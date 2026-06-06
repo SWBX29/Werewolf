@@ -1,0 +1,10 @@
+{
+  "name": "@langrensha/shared",
+  "version": "1.0.0",
+  "private": true,
+  "main": "types.ts",
+  "types": "types.ts",
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}
