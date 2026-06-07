@@ -4,6 +4,9 @@
   "private": true,
   "main": "types.ts",
   "types": "types.ts",
+  "scripts": {
+    "build": "tsc"
+  },
   "devDependencies": {
     "typescript": "^5.4.5"
   }

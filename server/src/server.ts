@@ -156,7 +156,7 @@ function stripPlayerToDTO(player: Player, forPlayerId: string | null, engine?: G
     witchAntidoteUsed: isSelf && player.role === 'witch' ? player.witchAntidoteUsed : null,
     witchPoisonUsed: isSelf && player.role === 'witch' ? player.witchPoisonUsed : null,
     guardLastProtected: isSelf && player.role === 'guard' ? player.guardLastProtected : null,
-    idiotRevealed: isSelf && player.role === 'idiot' ? player.idiotRevealed : null,
+    idiotRevealed: player.idiotRevealed ? true : (isSelf && player.role === 'idiot' ? false : null),
     canViewWolfChatHistory,
     guardProtectedHistory: isSelf && player.role === 'guard' ? player.guardProtectedHistory : null,
     nightmareTargetHistory: isSelf && player.role === 'nightmare_shadow' ? player.nightmareTargetHistory : null,
@@ -197,6 +197,7 @@ function buildPlayerRoomStateDTO(state: RoomState, forPlayerId: string, engine: 
     wolfVotes: (state.phase === 'NIGHT' && state.nightSubPhase?.currentRole === 'werewolf' && isSharedWolfRole(player?.role ?? 'villager', state.config.sharedWolfRoles)) ? state.wolfVotes : null,
     wolfVoteConsensus: (state.phase === 'NIGHT' && state.nightSubPhase?.currentRole === 'werewolf' && isSharedWolfRole(player?.role ?? 'villager', state.config.sharedWolfRoles)) ? state.wolfVoteConsensus : null,
     witchCanUseBothPotions: state.config.witchCanUseBothPotions,
+    pkCandidates: state.pkCandidates,
   };
 }
 
@@ -374,6 +375,10 @@ function handleMessage(ws: WebSocket, rawMessage: string): void {
     // ---- 白天操作 ----
     case 'DAY_VOTE':
       handleDayVote(client, message);
+      break;
+
+    case 'JUDGE_ELECTION_VOTE':
+      handleJudgeElectionVote(client, message);
       break;
 
     case 'KNIGHT_DUEL':
@@ -680,6 +685,21 @@ function handleDayVote(client: ClientContext, message: ClientMessage & { type: '
   const result = engine.submitVote(client.playerId, message.targetSeat);
   if (!result.success) {
     safeSend(client.ws, { type: 'ERROR', code: 'VOTE_FAILED', message: result.error! });
+    return;
+  }
+
+  broadcastRoomState(client.roomCode);
+}
+
+function handleJudgeElectionVote(client: ClientContext, message: ClientMessage & { type: 'JUDGE_ELECTION_VOTE' }): void {
+  if (!client.roomCode) return;
+
+  const engine = lobby.getRoom(client.roomCode);
+  if (!engine) return;
+
+  const result = engine.submitJudgeElectionVote(client.playerId, message.targetSeat);
+  if (!result.success) {
+    safeSend(client.ws, { type: 'ERROR', code: 'JUDGE_ELECTION_VOTE_FAILED', message: result.error! });
     return;
   }
 
@@ -1395,6 +1415,21 @@ lobby.setGameEventCallback((roomCode: string, eventType: string, data: Record<st
         type: 'IDIOT_REVEAL',
         seatNumber: data.seatNumber as number,
         nickname: data.nickname as string,
+      });
+      break;
+    case 'JUDGE_ELECTED':
+      broadcastToRoom(roomCode, {
+        type: 'JUDGE_ELECTED',
+        seatNumber: data.seatNumber as number,
+        nickname: data.nickname as string,
+        votes: data.votes as Record<number, number>,
+      });
+      break;
+    case 'JUDGE_ELECTION_TIE':
+      broadcastToRoom(roomCode, {
+        type: 'JUDGE_ELECTION_TIE',
+        tieCandidates: data.tieCandidates as number[],
+        votes: data.votes as Record<number, number>,
       });
       break;
   }

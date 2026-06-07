@@ -258,6 +258,8 @@ export class LobbyManager {
       speechOrder: [],
       currentSpeakerIndex: 0,
       votes: {},
+      judgeElectionVotes: {},
+      pkCandidates: [],
       nightActions: {},
       werewolfTarget: null,
       witchSaveTarget: null,

@@ -75,6 +75,7 @@ export default function PlayerList({ compact = false }: PlayerListProps) {
               {/* 状态图标 */}
               <div className="flex items-center gap-1">
                 {isDead && <span className="text-xs text-gray-600">💀</span>}
+                {p.idiotRevealed && !isDead && <span className="text-xs">🃏</span>}
                 {isMuted && <span className="text-xs">🔇</span>}
                 {isSpeaking && !isDead && (
                   <span className="text-xs text-amber-400">🎤</span>

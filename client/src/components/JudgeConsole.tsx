@@ -32,6 +32,7 @@ const PHASE_NAMES: Record<GamePhase, string> = {
   DAY_SETTLEMENT: '白天结算',
   DAY_INTERRUPT: '白天中断',
   PK_VOTE: 'PK投票',
+  JUDGE_ELECTION: '法官选举',
   GAME_OVER: '游戏结束',
 };
 

@@ -66,7 +66,7 @@ export default function GuardPanel() {
       ) : (
         <>
           <p className="text-sm text-gray-400 mb-4">
-            选择今晚守护的玩家。{allowSelf ? '首夜可守护自己。' : '不可守护自己。'}不可连续守护同一人。
+            选择今晚守护的玩家。{allowSelf ? '首夜可守护自己。' : '不可守护自己。'}不可重复守护同一人。
           </p>
 
           <TargetSelector

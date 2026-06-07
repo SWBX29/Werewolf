@@ -236,6 +236,7 @@ const RuleConfigSubSchema = new Schema<RuleConfig>({
     enum: ['DEATH', 'ALIVE'],
   },
   poisonBlockGun: { type: Boolean, required: true },
+  witchCanUseBothPotions: { type: Boolean, required: true, default: false },
   knightDuelWolfKing: {
     type: String,
     required: true,
@@ -303,6 +304,9 @@ const RuleConfigSubSchema = new Schema<RuleConfig>({
     enum: ['NONE', 'FACTION', 'ROLE'],
     default: 'FACTION',
   },
+
+  // ---- 法官选举 ----
+  judgeElectionEnabled: { type: Boolean, required: true, default: false },
 }, { _id: false, strict: 'throw' });
 
 /**
@@ -338,6 +342,8 @@ export interface RoomDocument extends Document {
   speechOrder: number[];
   currentSpeakerIndex: number;
   votes: Map<number, number>;
+  judgeElectionVotes: Map<number, number>;
+  pkCandidates: number[];
   nightActions: Map<string, NightActionData>;
   werewolfTarget: number | null;
   witchSaveTarget: number | null;
@@ -376,6 +382,7 @@ const RoomSchema = new Schema<RoomDocument>({
     required: true,
     enum: [
       'LOBBY', 'NIGHT', 'NIGHT_SETTLEMENT', 'DAY_ANNOUNCE',
+      'JUDGE_ELECTION',
       'DAY_SPEECH', 'DAY_VOTE', 'DAY_SETTLEMENT', 'DAY_INTERRUPT',
       'PK_VOTE', 'GAME_OVER',
     ],
@@ -388,6 +395,8 @@ const RoomSchema = new Schema<RoomDocument>({
   speechOrder: { type: [Number], default: [] },
   currentSpeakerIndex: { type: Number, default: 0 },
   votes: { type: Map, of: Number, default: {} },
+  judgeElectionVotes: { type: Map, of: Number, default: {} },
+  pkCandidates: { type: [Number], default: [] },
   nightActions: { type: Map, of: NightActionDataSubSchema, default: {} },
   werewolfTarget: { type: Number, default: null },
   witchSaveTarget: { type: Number, default: null },

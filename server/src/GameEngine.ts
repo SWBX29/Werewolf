@@ -1300,10 +1300,12 @@ export class GameEngine {
   // ==========================================================================
 
   /**
-   * 天亮公告 → 直接进入发言阶段
-   * 合并DAY_ANNOUNCE和DAY_SPEECH，不再保留独立的公告阶段
+   * 天亮公告 → 法官选举（第一天且启用时） → 发言阶段
    */
   private enterDayAnnounce(): void {
+    // 设置 DAY_ANNOUNCE 阶段（让客户端能正确显示天亮公告）
+    this.state.phase = 'DAY_ANNOUNCE';
+
     // 计算发言顺序（原先由 enterDayAnnounce 负责）
     this.calculateSpeechOrder();
 
@@ -1343,8 +1345,18 @@ export class GameEngine {
 
     this.onDayAnnounce(this.state.roomCode, announceDeaths, mutedSeats);
 
-    // 直接进入发言阶段，不再经过独立的 DAY_ANNOUNCE 阶段
-    this.enterDaySpeech();
+    this.onPhaseChange('DAY_ANNOUNCE', null, this.state.round);
+
+    // SYSTEM 模式：5秒后自动过渡到下一阶段（法官选举或发言阶段）
+    if (this.state.gameMode === 'SYSTEM') {
+      this.setTimer('day_announce', 5, () => {
+        if (this.state.round === 1 && this.state.config.judgeElectionEnabled) {
+          this.enterJudgeElection();
+        } else {
+          this.enterDaySpeech();
+        }
+      });
+    }
   }
 
   /**
@@ -1375,6 +1387,167 @@ export class GameEngine {
     if (this.state.gameMode === 'SYSTEM' && this.state.config.speechTimeout > 0) {
       this.setSpeechTimer();
     }
+  }
+
+  // ==========================================================================
+  // 法官（警长）选举
+  // ==========================================================================
+
+  /**
+   * 进入法官选举阶段
+   */
+  private enterJudgeElection(): void {
+    this.state.phase = 'JUDGE_ELECTION';
+    this.state.judgeElectionVotes = {};
+
+    this.logAction({
+      actorSeat: 0,
+      actorNickname: '系统',
+      actionType: 'JUDGE_ELECTION_START',
+      targetSeat: null,
+      targetNickname: null,
+      detail: {
+        candidates: this.state.players
+          .filter((p) => p.status === 'alive' && !p.isJudge)
+          .map((p) => p.seatNumber),
+      },
+    });
+
+    this.onPhaseChange('JUDGE_ELECTION', null, this.state.round);
+
+    // SYSTEM 模式：设置选举超时
+    if (this.state.gameMode === 'SYSTEM' && this.state.config.voteTimeout > 0) {
+      this.setTimer('judge_election', this.state.config.voteTimeout, () => {
+        this.resolveJudgeElection();
+      });
+    }
+  }
+
+  /**
+   * 提交法官选举投票
+   */
+  submitJudgeElectionVote(
+    playerId: string,
+    targetSeat: number | null,
+  ): { success: boolean; error?: string } {
+    if (this.state.phase !== 'JUDGE_ELECTION') {
+      return { success: false, error: '当前不在法官选举阶段' };
+    }
+
+    const player = this.getPlayerById(playerId);
+    if (!player) return { success: false, error: '玩家不存在' };
+    if (player.status !== 'alive') return { success: false, error: '你已死亡，无法投票' };
+    if (player.isJudge) return { success: false, error: '法官不参与选举投票' };
+    if (player.idiotRevealed) return { success: false, error: '白痴翻牌后失去投票权' };
+
+    // 校验目标合法性
+    if (targetSeat !== null) {
+      const target = this.getPlayerBySeat(targetSeat);
+      if (!target || target.status !== 'alive') {
+        return { success: false, error: '投票目标不合法' };
+      }
+      if (target.isJudge) {
+        return { success: false, error: '不能投给现任法官' };
+      }
+    }
+
+    this.state.judgeElectionVotes[player.seatNumber] = targetSeat ?? -1; // -1 表示弃票
+
+    this.logAction({
+      actorSeat: player.seatNumber,
+      actorNickname: player.nickname,
+      actionType: 'JUDGE_ELECTION_VOTE',
+      targetSeat,
+      targetNickname: targetSeat ? this.getPlayerBySeat(targetSeat)?.nickname || null : null,
+      detail: { isAbstain: targetSeat === null },
+    });
+
+    // 检查是否所有存活玩家都已投票
+    const aliveNonJudge = this.state.players.filter(
+      (p) => p.status === 'alive' && !p.isJudge && !p.idiotRevealed,
+    );
+    const allVoted = aliveNonJudge.every((p) => this.state.judgeElectionVotes[p.seatNumber] !== undefined);
+    if (allVoted) {
+      this.clearTimer('judge_election');
+      this.resolveJudgeElection();
+    }
+
+    return { success: true };
+  }
+
+  /**
+   * 结算法官选举
+   */
+  private resolveJudgeElection(): void {
+    const votes = this.state.judgeElectionVotes;
+
+    // 统计票数
+    const voteCount: Record<number, number> = {};
+    for (const [, target] of Object.entries(votes)) {
+      if (target !== null && target !== -1) {
+        voteCount[target] = (voteCount[target] || 0) + 1;
+      }
+    }
+
+    // 找最高票
+    let maxVotes = 0;
+    let winners: number[] = [];
+    for (const [seat, count] of Object.entries(voteCount)) {
+      if (count > maxVotes) {
+        maxVotes = count;
+        winners = [Number(seat)];
+      } else if (count === maxVotes) {
+        winners.push(Number(seat));
+      }
+    }
+
+    if (winners.length === 1) {
+      // 有明确当选者
+      const winnerSeat = winners[0];
+      const winnerPlayer = this.getPlayerBySeat(winnerSeat);
+      if (winnerPlayer) {
+        // 清除旧法官标记
+        for (const p of this.state.players) {
+          if (p.isJudge && p.status === 'alive') {
+            p.isJudge = false;
+          }
+        }
+        winnerPlayer.isJudge = true;
+
+        this.logAction({
+          actorSeat: 0,
+          actorNickname: '系统',
+          actionType: 'JUDGE_ELECTED',
+          targetSeat: winnerSeat,
+          targetNickname: winnerPlayer.nickname,
+          detail: { votes: voteCount },
+        });
+
+        this.onGameEvent(this.state.roomCode, 'JUDGE_ELECTED', {
+          seatNumber: winnerSeat,
+          nickname: winnerPlayer.nickname,
+          votes: voteCount,
+        });
+      }
+    } else if (winners.length > 1) {
+      // 平票，无人当选
+      this.logAction({
+        actorSeat: 0,
+        actorNickname: '系统',
+        actionType: 'JUDGE_ELECTION_TIE',
+        targetSeat: null,
+        targetNickname: null,
+        detail: { tieCandidates: winners, votes: voteCount },
+      });
+
+      this.onGameEvent(this.state.roomCode, 'JUDGE_ELECTION_TIE', {
+        tieCandidates: winners,
+        votes: voteCount,
+      });
+    }
+
+    // 选举结束，进入发言阶段
+    this.enterDaySpeech();
   }
 
   /**
@@ -1441,7 +1614,8 @@ export class GameEngine {
     playerId: string,
     targetSeat: number | null,
   ): { success: boolean; error?: string } {
-    if (this.state.phase !== 'DAY_VOTE') {
+    const isPK = this.state.phase === 'PK_VOTE';
+    if (this.state.phase !== 'DAY_VOTE' && !isPK) {
       return { success: false, error: '当前不在投票阶段' };
     }
 
@@ -1449,6 +1623,7 @@ export class GameEngine {
     if (!player) return { success: false, error: '玩家不存在' };
     if (player.status !== 'alive') return { success: false, error: '你已死亡，无法投票' };
     if (player.isJudge) return { success: false, error: '法官不参与投票' };
+    if (player.idiotRevealed) return { success: false, error: '白痴翻牌后失去投票权' };
 
     // 校验目标合法性
     if (targetSeat !== null) {
@@ -1458,6 +1633,10 @@ export class GameEngine {
       }
       if (targetSeat === player.seatNumber) {
         return { success: false, error: '不能投自己' };
+      }
+      // PK投票阶段：只能投给PK候选人
+      if (isPK && !this.state.pkCandidates.includes(targetSeat)) {
+        return { success: false, error: 'PK投票只能投给候选人' };
       }
     }
 
@@ -1469,17 +1648,22 @@ export class GameEngine {
       actionType: 'VOTE_CAST',
       targetSeat,
       targetNickname: targetSeat ? this.getPlayerBySeat(targetSeat)?.nickname || null : null,
-      detail: { isAbstain: targetSeat === null },
+      detail: { isAbstain: targetSeat === null, isPK },
     });
 
-    // 检查是否所有存活玩家都已投票
+    // 检查是否所有存活玩家都已投票（白痴翻牌后无投票权，跳过）
     const aliveNonJudge = this.state.players.filter(
-      (p) => p.status === 'alive' && !p.isJudge,
+      (p) => p.status === 'alive' && !p.isJudge && !p.idiotRevealed,
     );
     const allVoted = aliveNonJudge.every((p) => this.state.votes[p.seatNumber] !== undefined);
     if (allVoted) {
-      this.clearTimer('vote');
-      this.resolveDayVote();
+      if (isPK) {
+        this.clearTimer('pk_vote');
+        this.resolvePKVote();
+      } else {
+        this.clearTimer('vote');
+        this.resolveDayVote();
+      }
     }
 
     return { success: true };
@@ -1536,9 +1720,19 @@ export class GameEngine {
     }
 
     if (isPK) {
+      // 广播投票结果（平票进入PK）
+      this.onVoteResult(
+        this.state.roomCode,
+        { ...this.state.votes },
+        null, // 平票无人出局
+        true, // isPK
+        candidates,
+      );
+
       // 进入PK投票
       this.state.phase = 'PK_VOTE';
       this.state.votes = {};
+      this.state.pkCandidates = candidates;
       this.logAction({
         actorSeat: 0,
         actorNickname: '系统',
@@ -1548,8 +1742,73 @@ export class GameEngine {
         detail: { pkCandidates: candidates, voteCount },
       });
       this.onPhaseChange('PK_VOTE', null, this.state.round);
+
+      // SYSTEM 模式：设置PK投票超时
+      if (this.state.gameMode === 'SYSTEM' && this.state.config.voteTimeout > 0) {
+        this.setTimer('pk_vote', this.state.config.voteTimeout, () => {
+          this.resolvePKVote();
+        });
+      }
+
       return;
     }
+
+    // 执行出局
+    this.executeDaySettlement(eliminated, 'vote_out');
+  }
+
+  /**
+   * 结算PK投票
+   * PK投票仅限候选人，再次平票则无人出局
+   */
+  private resolvePKVote(): void {
+    const pkCandidates = this.state.pkCandidates;
+
+    // 统计票数
+    const voteCount: Record<number, number> = {};
+    for (const [voter, target] of Object.entries(this.state.votes)) {
+      const targetSeat = Number(target);
+      if (targetSeat > 0 && pkCandidates.includes(targetSeat)) {
+        voteCount[targetSeat] = (voteCount[targetSeat] || 0) + 1;
+      }
+    }
+
+    // 找出最高票
+    let maxVotes = 0;
+    let winners: number[] = [];
+    for (const [seat, count] of Object.entries(voteCount)) {
+      if (count > maxVotes) {
+        maxVotes = count;
+        winners = [Number(seat)];
+      } else if (count === maxVotes) {
+        winners.push(Number(seat));
+      }
+    }
+
+    let eliminated: number | null = null;
+
+    if (winners.length === 1) {
+      eliminated = winners[0];
+    }
+    // PK再次平票，无人出局
+
+    this.logAction({
+      actorSeat: 0,
+      actorNickname: '系统',
+      actionType: 'VOTE_RESULT',
+      targetSeat: eliminated,
+      targetNickname: eliminated ? this.getPlayerBySeat(eliminated)?.nickname || null : null,
+      detail: {
+        votes: this.state.votes,
+        eliminated,
+        isPK: true,
+        pkCandidates,
+        voteCount,
+      },
+    });
+
+    // 清除PK候选人
+    this.state.pkCandidates = [];
 
     // 执行出局
     this.executeDaySettlement(eliminated, 'vote_out');
@@ -1647,10 +1906,12 @@ export class GameEngine {
     this.state.dayDeaths = dayDeaths;
 
     // 广播投票结果给客户端
+    // 白痴翻牌免死时，eliminated 应为 null（无人实际出局）
+    const actualEliminated = dayDeaths.length > 0 ? eliminated : null;
     this.onVoteResult(
       this.state.roomCode,
       { ...this.state.votes },
-      eliminated,
+      actualEliminated,
       false,
       [],
     );
@@ -2322,11 +2583,23 @@ export class GameEngine {
       case 'NIGHT_SETTLEMENT':
         this.enterDayAnnounce();
         break;
+      case 'DAY_ANNOUNCE':
+        this.clearTimer('day_announce');
+        if (this.state.round === 1 && this.state.config.judgeElectionEnabled) {
+          this.enterJudgeElection();
+        } else {
+          this.enterDaySpeech();
+        }
+        break;
       case 'DAY_SPEECH':
         this.enterDayVote();
         break;
       case 'DAY_VOTE':
         this.resolveDayVote();
+        break;
+      case 'JUDGE_ELECTION':
+        this.clearTimer('judge_election');
+        this.resolveJudgeElection();
         break;
       case 'DAY_SETTLEMENT':
         this.state.round++;
@@ -2338,9 +2611,8 @@ export class GameEngine {
         this.onPhaseChange('DAY_SPEECH', null, this.state.round);
         break;
       case 'PK_VOTE':
-        // PK投票后继续白天结算
-        this.state.phase = 'DAY_SETTLEMENT';
-        this.onPhaseChange('DAY_SETTLEMENT', null, this.state.round);
+        this.clearTimer('pk_vote');
+        this.resolvePKVote();
         break;
       case 'GAME_OVER':
         return { success: false, error: '游戏已结束' };

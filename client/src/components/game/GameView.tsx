@@ -110,6 +110,9 @@ const GameView: React.FC = () => {
       case 'PK_VOTE':
         return <VotePhase />;
 
+      case 'JUDGE_ELECTION':
+        return <JudgeElection />;
+
       case 'DAY_SETTLEMENT':
       case 'DAY_INTERRUPT':
         return <InterruptPanel />;
@@ -316,17 +319,41 @@ const LobbyPanel: React.FC = () => {
 // ============================================================================
 
 const InterruptPanel: React.FC = () => {
+  const playerState = useGameStore((s) => s.playerState);
   const knightDuelResult = useGameStore((s) => s.knightDuelResult);
   const phaseAnnouncement = useGameStore((s) => s.phaseAnnouncement);
+  const voteResult = useGameStore((s) => s.voteResult);
+
+  const isSettlement = playerState?.phase === 'DAY_SETTLEMENT';
 
   return (
     <div className="flex-1 flex items-center justify-center p-4 bg-day-phase">
       <div className="card max-w-md w-full text-center space-y-4 animate-fade-in-up">
-        <div className="text-4xl">⚡</div>
-        <h2 className="text-xl font-bold text-amber-400">白天中断</h2>
+        <div className="text-4xl">{isSettlement ? '📋' : '⚡'}</div>
+        <h2 className="text-xl font-bold text-amber-400">
+          {isSettlement ? '白天结算' : '白天中断'}
+        </h2>
 
         {phaseAnnouncement && (
           <p className="text-gray-300">{phaseAnnouncement}</p>
+        )}
+
+        {/* 投票结果显示 */}
+        {isSettlement && voteResult && (
+          <div className="p-4 rounded-lg bg-night-800/50 border border-night-600">
+            {voteResult.eliminated ? (
+              <p className="font-semibold text-red-400">
+                {voteResult.eliminated}号玩家被投票出局
+              </p>
+            ) : (
+              <p className="font-semibold text-green-400">平安日，无人出局</p>
+            )}
+            {voteResult.isPK && voteResult.pkCandidates && voteResult.pkCandidates.length > 0 && (
+              <p className="text-sm text-yellow-300 mt-2">
+                平票进入PK：{voteResult.pkCandidates.map((s) => `${s}号`).join('、')}
+              </p>
+            )}
+          </div>
         )}
 
         {knightDuelResult && (
@@ -350,11 +377,6 @@ const InterruptPanel: React.FC = () => {
             )}
           </div>
         )}
-
-        {/* 技能覆盖层（猎人/狼王开枪等） */}
-        <HunterGun />
-        <WolfKingGun />
-        <IdiotReveal />
 
         <p className="text-sm text-gray-500">等待结算完成...</p>
       </div>
