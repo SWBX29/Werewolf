@@ -577,6 +577,8 @@ export interface RoomState {
   wolfVoteConsensus: boolean;
   /** 狼人聊天消息列表（当夜） */
   wolfChatMessages: WolfChatMessage[];
+  /** PK投票候选人座位号列表（仅在PK_VOTE阶段有值） */
+  pkCandidates: number[];
   /** 当晚结算死亡列表 */
   nightDeaths: NightDeathRecord[];
   /** 白天死亡列表 */
@@ -744,6 +746,8 @@ export interface PlayerRoomStateDTO {
   wolfVotes: Record<number, number> | null;
   /** 狼人投票是否达成一致 */
   wolfVoteConsensus: boolean | null;
+  /** PK投票候选人座位号列表（仅PK_VOTE阶段有值） */
+  pkCandidates: number[];
   /** 获胜阵营（仅 GAME_OVER 阶段有值） */
   winner: Faction | null;
   /** 女巫同一晚能否同时使用解药和毒药 */
@@ -855,6 +859,7 @@ export type ClientMessageType =
   | 'JUDGE_TRIGGER_KNIGHT_DUEL'
   | 'JUDGE_TRIGGER_WHITE_WOLF'
   | 'JUDGE_SKIP_SPEECH'
+  | 'JUDGE_NEXT_SPEAKER'
   | 'WOLF_CHAT'
   | 'WOLF_VOTE'
   | 'DEAD_CHAT'
@@ -1088,6 +1093,13 @@ export interface JudgeSkipSpeechMessage {
 }
 
 /**
+ * 法官推进到下一位发言者
+ */
+export interface JudgeNextSpeakerMessage {
+  type: 'JUDGE_NEXT_SPEAKER';
+}
+
+/**
  * 狼人聊天消息 — 狼人子阶段专属聊天
  */
 export interface WolfChatClientMessage {
@@ -1178,6 +1190,7 @@ export type ClientMessage =
   | JudgeTriggerKnightDuelMessage
   | JudgeTriggerWhiteWolfMessage
   | JudgeSkipSpeechMessage
+  | JudgeNextSpeakerMessage
   | WolfChatClientMessage
   | WolfVoteClientMessage
   | DeadChatClientMessage

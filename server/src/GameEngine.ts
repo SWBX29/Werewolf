@@ -366,6 +366,7 @@ export class GameEngine {
     this.state.wolfVotes = {};
     this.state.wolfVoteConsensus = false;
     this.state.wolfChatMessages = [];
+    this.state.pkCandidates = [];
 
     // 规则七：恐惧始终当夜生效，不再有延期机制
 
@@ -604,11 +605,11 @@ export class GameEngine {
    */
   private enterWolfSubPhase(): void {
     // 规则24：隐狼唯一存活且被恐惧时，狼人阶段自动跳过
+    const sharedRoles = this.state.config.sharedWolfRoles;
     const aliveWolves = this.state.players.filter(
-      (p) => !p.isJudge && p.status === 'alive' && isEvilRole(p.role)
+      (p) => !p.isJudge && p.status === 'alive' && (isSharedWolfRole(p.role, sharedRoles) || (p.role === 'mechanical_wolf' && this.canMechanicalWolfActAsWolf())),
     );
     const canActWolves = aliveWolves.filter((p) => {
-      if (isHiddenWolf(p.role) && p.isNightmared) return false;
       if (p.isNightmared) return false;
       return true;
     });
@@ -724,10 +725,12 @@ export class GameEngine {
     const sharedRoles = this.state.config.sharedWolfRoles;
 
     if (isWolfSubPhase) {
-      // 狼人子阶段：提交者必须是共同睁眼的狼人
+      // 狼人子阶段：提交者必须是共同睁眼的狼人或可行动的机械狼
       const player = this.getPlayerById(playerId);
       if (!player) return { success: false, error: '玩家不存在' };
-      if (!isSharedWolfRole(player.role, sharedRoles)) {
+      const isSharedWolf = isSharedWolfRole(player.role, sharedRoles);
+      const isMechWolfActor = player.role === 'mechanical_wolf' && this.canMechanicalWolfActAsWolf();
+      if (!isSharedWolf && !isMechWolfActor) {
         return { success: false, error: '你不是共同睁眼的狼人' };
       }
       if (player.status !== 'alive') return { success: false, error: '你已死亡，无法行动' };
@@ -835,6 +838,11 @@ export class GameEngine {
 
     // 记录该狼人的投票
     this.state.wolfVotes[player.seatNumber] = killTarget;
+
+    // 规则三：隐狼参与狼人投票后永久标记为已行动
+    if (isHiddenWolf(player.role)) {
+      player.hiddenWolfHasActed = true;
+    }
 
     this.logAction({
       actorSeat: player.seatNumber,
@@ -1441,7 +1449,7 @@ export class GameEngine {
     playerId: string,
     targetSeat: number | null,
   ): { success: boolean; error?: string } {
-    if (this.state.phase !== 'DAY_VOTE') {
+    if (this.state.phase !== 'DAY_VOTE' && this.state.phase !== 'PK_VOTE') {
       return { success: false, error: '当前不在投票阶段' };
     }
 
@@ -1449,6 +1457,17 @@ export class GameEngine {
     if (!player) return { success: false, error: '玩家不存在' };
     if (player.status !== 'alive') return { success: false, error: '你已死亡，无法投票' };
     if (player.isJudge) return { success: false, error: '法官不参与投票' };
+    // 规则：白痴翻牌后失去投票权
+    if (player.role === 'idiot' && player.idiotRevealed) {
+      return { success: false, error: '白痴翻牌后不可投票' };
+    }
+
+    // PK投票阶段：只能投PK候选人
+    if (this.state.phase === 'PK_VOTE' && targetSeat !== null) {
+      if (!this.state.pkCandidates?.includes(targetSeat)) {
+        return { success: false, error: '只能投票给PK候选人' };
+      }
+    }
 
     // 校验目标合法性
     if (targetSeat !== null) {
@@ -1474,12 +1493,17 @@ export class GameEngine {
 
     // 检查是否所有存活玩家都已投票
     const aliveNonJudge = this.state.players.filter(
-      (p) => p.status === 'alive' && !p.isJudge,
+      (p) => p.status === 'alive' && !p.isJudge && !(p.role === 'idiot' && p.idiotRevealed),
     );
     const allVoted = aliveNonJudge.every((p) => this.state.votes[p.seatNumber] !== undefined);
     if (allVoted) {
       this.clearTimer('vote');
-      this.resolveDayVote();
+      this.clearTimer('pk_vote');
+      if (this.state.phase === 'PK_VOTE') {
+        this.resolvePKVote(this.state.pkCandidates);
+      } else {
+        this.resolveDayVote();
+      }
     }
 
     return { success: true };
@@ -1539,6 +1563,7 @@ export class GameEngine {
       // 进入PK投票
       this.state.phase = 'PK_VOTE';
       this.state.votes = {};
+      this.state.pkCandidates = candidates;
       this.logAction({
         actorSeat: 0,
         actorNickname: '系统',
@@ -1548,8 +1573,51 @@ export class GameEngine {
         detail: { pkCandidates: candidates, voteCount },
       });
       this.onPhaseChange('PK_VOTE', null, this.state.round);
+
+      // SYSTEM 模式：设置PK投票超时
+      if (this.state.gameMode === 'SYSTEM' && this.state.config.voteTimeout > 0) {
+        this.setTimer('pk_vote', this.state.config.voteTimeout, () => {
+          this.resolvePKVote(candidates);
+        });
+      }
       return;
     }
+
+    // 执行出局
+    this.executeDaySettlement(eliminated, 'vote_out');
+  }
+
+  /**
+   * 结算PK投票
+   * PK投票仅限候选人之间，再次平票则无人出局
+   */
+  private resolvePKVote(candidates: number[]): void {
+    // 统计票数
+    const voteCount: Record<number, number> = {};
+    for (const [voter, target] of Object.entries(this.state.votes)) {
+      const targetSeat = Number(target);
+      if (targetSeat > 0 && candidates.includes(targetSeat)) {
+        voteCount[targetSeat] = (voteCount[targetSeat] || 0) + 1;
+      }
+    }
+
+    // 找出最高票
+    let maxVotes = 0;
+    let topCandidates: number[] = [];
+    for (const [seat, count] of Object.entries(voteCount)) {
+      if (count > maxVotes) {
+        maxVotes = count;
+        topCandidates = [Number(seat)];
+      } else if (count === maxVotes) {
+        topCandidates.push(Number(seat));
+      }
+    }
+
+    let eliminated: number | null = null;
+    if (topCandidates.length === 1) {
+      eliminated = topCandidates[0];
+    }
+    // PK再次平票则无人出局
 
     // 执行出局
     this.executeDaySettlement(eliminated, 'vote_out');
@@ -2756,13 +2824,21 @@ export class GameEngine {
         },
       });
     } else {
-      // 无人投票，随机选择
+      // 无人投票，随机选择非狼人阵营的存活玩家
       const alivePlayers = this.state.players.filter(
-        (p) => !p.isJudge && p.status === 'alive',
+        (p) => !p.isJudge && p.status === 'alive' && !isEvilRole(p.role),
       );
 
       if (alivePlayers.length === 0) {
-        this.state.werewolfTarget = null;
+        // 所有存活玩家都是狼人阵营（极端情况），随机选一个
+        const allAlive = this.state.players.filter(
+          (p) => !p.isJudge && p.status === 'alive',
+        );
+        if (allAlive.length === 0) {
+          this.state.werewolfTarget = null;
+        } else {
+          this.state.werewolfTarget = allAlive[Math.floor(Math.random() * allAlive.length)].seatNumber;
+        }
       } else {
         const randomTarget = alivePlayers[Math.floor(Math.random() * alivePlayers.length)];
         this.state.werewolfTarget = randomTarget.seatNumber;
@@ -2856,16 +2932,30 @@ export class GameEngine {
    * 噩梦之影超时处理：系统随机选择一名存活玩家进行恐惧
    */
   private handleNightmareTimeout(): void {
+    const nightmarePlayer = this.state.players.find(
+      (p) => p.role === 'nightmare_shadow' && p.status === 'alive',
+    );
+
     const alivePlayers = this.state.players.filter(
       (p) => !p.isJudge && p.status === 'alive' && !isEvilRole(p.role),
     );
 
-    if (alivePlayers.length > 0) {
-      const randomTarget = alivePlayers[Math.floor(Math.random() * alivePlayers.length)];
+    // 过滤掉已恐惧过的目标（规则二：不可重复恐惧同一人）
+    const availableTargets = nightmarePlayer
+      ? alivePlayers.filter((p) => !nightmarePlayer.nightmareTargetHistory.includes(p.seatNumber))
+      : alivePlayers;
+
+    if (availableTargets.length > 0) {
+      const randomTarget = availableTargets[Math.floor(Math.random() * availableTargets.length)];
       this.state.nightmareTarget = randomTarget.seatNumber;
 
       // 恐惧效果始终当夜生效（规则七：全技能封禁当夜）
       this.applyNightmareEffect(randomTarget.seatNumber);
+
+      // 记录恐惧历史
+      if (nightmarePlayer && !nightmarePlayer.nightmareTargetHistory.includes(randomTarget.seatNumber)) {
+        nightmarePlayer.nightmareTargetHistory.push(randomTarget.seatNumber);
+      }
 
       this.logAction({
         actorSeat: 0,
@@ -2894,9 +2984,14 @@ export class GameEngine {
 
     if (alivePlayers.length > 0 && seer) {
       const randomTarget = alivePlayers[Math.floor(Math.random() * alivePlayers.length)];
-      const seerResult: Faction = isHiddenWolf(randomTarget.role)
-        ? (randomTarget.hiddenWolfHasActed ? 'evil' : 'good')
-        : ROLE_META[randomTarget.role].faction;
+      let seerResult: Faction;
+      if (isHiddenWolf(randomTarget.role)) {
+        seerResult = randomTarget.hiddenWolfHasActed ? 'evil' : 'good';
+      } else if (randomTarget.role === 'mechanical_wolf') {
+        seerResult = this.getMechanicalWolfSeerResult(randomTarget);
+      } else {
+        seerResult = ROLE_META[randomTarget.role].faction;
+      }
 
       this.logAction({
         actorSeat: 0,
@@ -3323,7 +3418,7 @@ export class GameEngine {
     // 检查该玩家是否属于当前行动角色
     const isWolfPhase = roleId === 'werewolf';
     const isActor = isWolfPhase
-      ? isSharedWolfRole(player.role, this.state.config.sharedWolfRoles)
+      ? (isSharedWolfRole(player.role, this.state.config.sharedWolfRoles) || (player.role === 'mechanical_wolf' && this.canMechanicalWolfActAsWolf()))
       : player.role === roleId;
 
     if (!isActor) return null;
