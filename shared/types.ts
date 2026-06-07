@@ -882,7 +882,7 @@ export type ClientMessageType =
   | 'ARBITRATION_VOTE'
   | 'ADMIN_FETCH_LOGS'
   | 'ADMIN_CLEANUP_CONFIG'
-  | 'JUDGE_ELECTION_VOTE';
+  | 'SHERIFF_ELECTION_VOTE';
 
 /**
  * 服务端 → 客户端 消息类型枚举
@@ -900,8 +900,8 @@ export type ServerMessageType =
   | 'HUNTER_GUN_RESULT'
   | 'WOLF_KING_GUN_RESULT'
   | 'IDIOT_REVEAL'
-  | 'JUDGE_ELECTED'
-  | 'JUDGE_ELECTION_TIE'
+  | 'SHERIFF_ELECTED'
+  | 'SHERIFF_ELECTION_TIE'
   | 'GAME_OVER'
   | 'ERROR'
   | 'JUDGE_WARNING'
@@ -1525,8 +1525,8 @@ export type ServerMessage =
   | HunterGunResultMessage
   | WolfKingGunResultMessage
   | IdiotRevealMessage
-  | JudgeElectedMessage
-  | JudgeElectionTieMessage
+  | SheriffElectedMessage
+  | SheriffElectionTieMessage
   | GameOverMessage
   | ErrorMessage
   | JudgeWarningMessage
@@ -1583,11 +1583,11 @@ export type ActionType =
   | 'HUNTER_GUN'
   | 'WOLF_KING_GUN'
   | 'IDIOT_REVEAL'
-  // 法官选举
-  | 'JUDGE_ELECTION_START'
-  | 'JUDGE_ELECTION_VOTE'
-  | 'JUDGE_ELECTED'
-  | 'JUDGE_ELECTION_TIE'
+  // 警长选举
+  | 'SHERIFF_ELECTION_START'
+  | 'SHERIFF_ELECTION_VOTE'
+  | 'SHERIFF_ELECTED'
+  | 'SHERIFF_ELECTION_TIE'
   // 法官操作
   | 'JUDGE_OVERRIDE_SETTLEMENT'
   | 'JUDGE_FORCE_NEXT_PHASE'
