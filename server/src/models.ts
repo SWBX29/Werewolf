@@ -74,6 +74,7 @@ const PlayerSubSchema = new Schema<Player>({
     default: 'alive',
   },
   isJudge: { type: Boolean, required: true, default: false },
+  isSheriff: { type: Boolean, required: true, default: false },
   isHost: { type: Boolean, required: true, default: false },
   isReady: { type: Boolean, required: true, default: false },
   isNightmared: { type: Boolean, required: true, default: false },
@@ -305,8 +306,9 @@ const RuleConfigSubSchema = new Schema<RuleConfig>({
     default: 'FACTION',
   },
 
-  // ---- 法官选举 ----
-  judgeElectionEnabled: { type: Boolean, required: true, default: false },
+  // ---- 警长选举 ----
+  sheriffElectionEnabled: { type: Boolean, required: true, default: false },
+  sheriffVoteWeight: { type: Number, required: true, default: 1.5, enum: [1, 1.5, 2] },
 }, { _id: false, strict: 'throw' });
 
 /**
@@ -342,7 +344,7 @@ export interface RoomDocument extends Document {
   speechOrder: number[];
   currentSpeakerIndex: number;
   votes: Map<number, number>;
-  judgeElectionVotes: Map<number, number>;
+  sheriffElectionVotes: Map<number, number>;
   pkCandidates: number[];
   nightActions: Map<string, NightActionData>;
   werewolfTarget: number | null;
@@ -382,7 +384,7 @@ const RoomSchema = new Schema<RoomDocument>({
     required: true,
     enum: [
       'LOBBY', 'NIGHT', 'NIGHT_SETTLEMENT', 'DAY_ANNOUNCE',
-      'JUDGE_ELECTION',
+      'SHERIFF_ELECTION', 'SHERIFF_TRANSFER',
       'DAY_SPEECH', 'DAY_VOTE', 'DAY_SETTLEMENT', 'DAY_INTERRUPT',
       'PK_VOTE', 'GAME_OVER',
     ],
@@ -395,7 +397,7 @@ const RoomSchema = new Schema<RoomDocument>({
   speechOrder: { type: [Number], default: [] },
   currentSpeakerIndex: { type: Number, default: 0 },
   votes: { type: Map, of: Number, default: {} },
-  judgeElectionVotes: { type: Map, of: Number, default: {} },
+  sheriffElectionVotes: { type: Map, of: Number, default: {} },
   pkCandidates: { type: [Number], default: [] },
   nightActions: { type: Map, of: NightActionDataSubSchema, default: {} },
   werewolfTarget: { type: Number, default: null },
@@ -467,9 +469,10 @@ const GameLogSchema = new Schema<GameLogDocument>({
   },
   gameId: {
     type: String,
-    required: true,
+    required: false,
     uppercase: true,
     trim: true,
+    default: '',
   },
   timestamp: { type: Number, required: true, default: () => Date.now() },
   actorSeat: { type: Number, required: true, min: 0 },
@@ -489,6 +492,9 @@ const GameLogSchema = new Schema<GameLogDocument>({
       'VOTE_CAST', 'VOTE_RESULT', 'PK_VOTE_START',
       // 特殊技能
       'KNIGHT_DUEL', 'WHITE_WOLF_EXPLODE', 'HUNTER_GUN', 'WOLF_KING_GUN', 'IDIOT_REVEAL',
+      // 警长选举
+      'SHERIFF_ELECTION_START', 'SHERIFF_ELECTION_VOTE', 'SHERIFF_ELECTED', 'SHERIFF_ELECTION_TIE',
+      'SHERIFF_TRANSFER',
       // 法官操作
       'JUDGE_OVERRIDE_SETTLEMENT', 'JUDGE_FORCE_NEXT_PHASE',
       'JUDGE_PAUSE', 'JUDGE_RESUME', 'JUDGE_MODIFY_SPEECH_ORDER',
@@ -496,6 +502,10 @@ const GameLogSchema = new Schema<GameLogDocument>({
       'JUDGE_TRIGGER_WHITE_WOLF', 'JUDGE_SKIP_SPEECH',
       // 系统
       'GAME_OVER', 'PHASE_CHANGE', 'TIMER_EXPIRED',
+      // V10 新增
+      'WOLF_PHASE_SKIPPED', 'GUARD_NO_VALID_TARGET',
+      'MECHANICAL_WOLF_SKILL_DEFERRED', 'DEAD_CHAT_MESSAGE',
+      'DAY_VOTE_IDENTITY_REVEAL',
     ],
   },
   targetSeat: { type: Number, default: null },
@@ -505,6 +515,7 @@ const GameLogSchema = new Schema<GameLogDocument>({
     required: true,
     enum: [
       'LOBBY', 'NIGHT', 'NIGHT_SETTLEMENT', 'DAY_ANNOUNCE',
+      'SHERIFF_ELECTION', 'SHERIFF_TRANSFER',
       'DAY_SPEECH', 'DAY_VOTE', 'DAY_SETTLEMENT', 'DAY_INTERRUPT',
       'PK_VOTE', 'GAME_OVER',
     ],
@@ -515,9 +526,11 @@ const GameLogSchema = new Schema<GameLogDocument>({
   overrideReason: { type: String, default: null },
   nightActionOrderSnapshot: {
     type: [String],
-    required: true,
+    required: false,
+    default: [],
     validate: {
       validator(v: string[]) {
+        if (!v || v.length === 0) return true;
         const validRoles = new Set([
           'villager', 'seer', 'witch', 'hunter', 'guard', 'idiot', 'knight',
           'werewolf', 'white_wolf_king', 'wolf_king', 'nightmare_shadow', 'hidden_wolf', 'mechanical_wolf',

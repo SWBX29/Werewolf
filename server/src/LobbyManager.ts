@@ -27,6 +27,8 @@ import type {
   PlayerStatus,
   RoleId,
   WolfChatMessage,
+  ActionLog,
+  ActionType,
 } from '@langrensha/shared';
 import {
   ROOM_CODE_CHARSET,
@@ -85,6 +87,12 @@ export interface ClientContext {
   isJudge: boolean;
   /** 连接时间 */
   connectedAt: number;
+  /** 是否已断连（等待重连中） */
+  disconnected: boolean;
+  /** 断连时间戳 */
+  disconnectedAt: number | null;
+  /** 宽限期定时器引用（用于重连时取消旧定时器） */
+  gracePeriodTimer: ReturnType<typeof setTimeout> | null;
 }
 
 // ============================================================================
@@ -151,6 +159,9 @@ export class LobbyManager {
       roomCode: null,
       isJudge: false,
       connectedAt: Date.now(),
+      disconnected: false,
+      disconnectedAt: null,
+      gracePeriodTimer: null,
     };
 
     this.clients.set(playerId, context);
@@ -161,7 +172,7 @@ export class LobbyManager {
 
   /**
    * 注销 WebSocket 连接
-   * 在连接断开时调用，自动清理房间中的玩家
+   * 在连接断开时调用，标记玩家为断连状态，给予宽限期等待重连
    */
   unregisterConnection(ws: any): { roomCode: string | null; playerId: string } {
     const playerId = this.wsToPlayerId.get(ws);
@@ -170,16 +181,108 @@ export class LobbyManager {
     const context = this.clients.get(playerId);
     if (!context) return { roomCode: null, playerId };
 
-    // 如果玩家在房间中，执行离开逻辑
-    if (context.roomCode) {
-      this.leaveRoom(playerId);
-    }
+    // 标记为断连，而非立即移除
+    context.disconnected = true;
+    context.disconnectedAt = Date.now();
+    context.ws = null; // 释放旧 WebSocket 引用
 
-    // 清理映射
-    this.clients.delete(playerId);
+    // 清理 ws 映射
     this.wsToPlayerId.delete(ws);
 
-    return { roomCode: context.roomCode, playerId };
+    // 如果玩家不在房间中，直接清理
+    if (!context.roomCode) {
+      this.clients.delete(playerId);
+      return { roomCode: null, playerId };
+    }
+
+    // 清除旧的宽限期定时器（防止多次断连产生多个定时器）
+    if (context.gracePeriodTimer) {
+      clearTimeout(context.gracePeriodTimer);
+    }
+
+    // 在房间中：设置宽限期（60秒），超时后真正移除
+    const roomCode = context.roomCode;
+    context.gracePeriodTimer = setTimeout(() => {
+      const ctx = this.clients.get(playerId);
+      // 如果宽限期结束时仍未重连，执行离开逻辑
+      if (ctx && ctx.disconnected && ctx.roomCode === roomCode) {
+        console.log(`[Lobby] 玩家 ${playerId} 重连超时，执行离开房间 ${roomCode}`);
+        ctx.gracePeriodTimer = null;
+        this.leaveRoom(playerId);
+        this.clients.delete(playerId);
+      }
+    }, 60 * 1000); // 60秒宽限期
+
+    return { roomCode, playerId };
+  }
+
+  /**
+   * 玩家重连 — 使用之前的 playerId 恢复会话
+   * 返回旧 context 和新 context 的 playerId，以便调用方清理新 context
+   */
+  reconnectPlayer(playerId: string, roomCode: string, newWs: any): { success: boolean; error?: string; context?: ClientContext; newPlayerId?: string } {
+    const context = this.clients.get(playerId);
+    if (!context) {
+      return { success: false, error: '找不到之前的会话，请重新加入房间' };
+    }
+
+    if (context.roomCode !== roomCode) {
+      return { success: false, error: '房间码不匹配' };
+    }
+
+    // 如果旧连接仍标记为"已连接"，说明服务端未检测到断连（TCP 半开连接）
+    // 此时强制标记为断连，允许重连替换旧连接
+    if (!context.disconnected) {
+      console.log(`[Lobby] 玩家 ${playerId} 旧连接仍标记为已连接，强制替换为新连接`);
+      // 清理旧 ws 映射
+      if (context.ws) {
+        this.wsToPlayerId.delete(context.ws);
+        // 尝试关闭旧 WebSocket（可能已经死亡但服务端未检测到）
+        try { (context.ws as any).close(); } catch {}
+      }
+      context.disconnected = true;
+      context.disconnectedAt = Date.now();
+    }
+
+    // 清除宽限期定时器
+    if (context.gracePeriodTimer) {
+      clearTimeout(context.gracePeriodTimer);
+      context.gracePeriodTimer = null;
+    }
+
+    // 在覆盖 ws 映射之前，先找到新 ws 对应的新 playerId
+    // 此时 wsToPlayerId.get(newWs) 仍然指向 registerConnection 创建的 newPlayerId
+    const newPlayerId = this.wsToPlayerId.get(newWs);
+    const actualNewPlayerId = (newPlayerId && newPlayerId !== playerId) ? newPlayerId : undefined;
+
+    // 恢复连接
+    context.disconnected = false;
+    context.disconnectedAt = null;
+    context.ws = newWs;
+
+    // 更新 ws 映射：newWs → 旧 playerId
+    this.wsToPlayerId.set(newWs, playerId);
+
+    console.log(`[Lobby] 玩家 ${playerId} (${context.nickname}) 重连成功，房间 ${roomCode}${actualNewPlayerId ? `，需清理临时 context ${actualNewPlayerId}` : ''}`);
+
+    return { success: true, context, newPlayerId: actualNewPlayerId };
+  }
+
+  /**
+   * 删除指定 playerId 的 ClientContext（用于重连时清理新创建的临时 context）
+   */
+  removeClientContext(playerId: string): void {
+    const ctx = this.clients.get(playerId);
+    if (ctx) {
+      if (ctx.gracePeriodTimer) {
+        clearTimeout(ctx.gracePeriodTimer);
+      }
+      // 清理 wsToPlayerId 映射（如果 ws 仍指向此 playerId）
+      if (ctx.ws && this.wsToPlayerId.get(ctx.ws) === playerId) {
+        this.wsToPlayerId.delete(ctx.ws);
+      }
+      this.clients.delete(playerId);
+    }
   }
 
   /**
@@ -258,7 +361,7 @@ export class LobbyManager {
       speechOrder: [],
       currentSpeakerIndex: 0,
       votes: {},
-      judgeElectionVotes: {},
+      sheriffElectionVotes: {},
       pkCandidates: [],
       nightActions: {},
       werewolfTarget: null,
@@ -298,6 +401,10 @@ export class LobbyManager {
       (rc, eventType, data) => { this.onGameEvent(rc, eventType, data); },
       // 夜间子阶段推进回调
       (rc) => { this.onNightSubPhaseAdvance(rc); },
+      // 夜间倒计时广播回调
+      (rc, roleId, remaining) => { this.onNightCountdown(rc, roleId, remaining); },
+      // 发言倒计时广播回调
+      (rc, seatNumber, remaining) => { this.onSpeechCountdown(rc, seatNumber, remaining); },
       // 天亮公告回调
       (rc, deaths, mutedSeats) => { this.onDayAnnounce(rc, deaths, mutedSeats); },
       // 投票结果回调
@@ -322,6 +429,7 @@ export class LobbyManager {
       role: 'villager', // 法官角色无意义，默认值
       status: 'alive',
       isJudge,
+      isSheriff: false,
       isHost: true,
       isReady: false,
       isNightmared: false,
@@ -346,6 +454,25 @@ export class LobbyManager {
     // 添加房主到房间
     const state = engine.getState() as RoomState;
     state.players.push(hostPlayer);
+
+    // 记录房主加入日志
+    this.onLog({
+      id: `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
+      roomCode,
+      gameId: '',
+      timestamp: Date.now(),
+      actorSeat: 0,
+      actorNickname: hostNickname.trim(),
+      actionType: 'PLAYER_JOIN' as ActionType,
+      targetSeat: null,
+      targetNickname: null,
+      phase: 'LOBBY',
+      round: 0,
+      detail: { roomCode, gameMode, config, isJudge: true },
+      overridden: false,
+      overrideReason: null,
+      nightActionOrderSnapshot: [...config.nightActionOrder],
+    } as ActionLog);
 
     // 复用已有的客户端上下文（WebSocket 连接时已注册）
     const existingPlayerId = this.wsToPlayerId.get(hostWs);
@@ -461,6 +588,7 @@ export class LobbyManager {
       role: 'villager', // 默认值，游戏开始时随机分配
       status: 'alive',
       isJudge: false,
+      isSheriff: false,
       isHost: false,
       isReady: false,
       isNightmared: false,
@@ -483,6 +611,25 @@ export class LobbyManager {
     };
 
     state.players.push(player);
+
+    // 记录玩家加入日志
+    this.onLog({
+      id: `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
+      roomCode: state.roomCode,
+      gameId: '',
+      timestamp: Date.now(),
+      actorSeat: seatNumber,
+      actorNickname: nickname.trim(),
+      actionType: 'PLAYER_JOIN' as ActionType,
+      targetSeat: null,
+      targetNickname: null,
+      phase: 'LOBBY',
+      round: 0,
+      detail: { playerCount: state.players.filter(p => !p.isJudge).length, maxPlayers: state.config.playerCount },
+      overridden: false,
+      overrideReason: null,
+      nightActionOrderSnapshot: [...state.config.nightActionOrder],
+    } as ActionLog);
 
     return {
       success: true,
@@ -520,6 +667,25 @@ export class LobbyManager {
     // 如果游戏正在进行中，玩家断线但不移除（标记为断线状态）
     // 如果在大厅阶段，直接移除
     if (state.phase === 'LOBBY') {
+      // 记录玩家离开日志（大厅阶段）
+      this.onLog({
+        id: `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
+        roomCode: state.roomCode,
+        gameId: '',
+        timestamp: Date.now(),
+        actorSeat: player.seatNumber,
+        actorNickname: player.nickname,
+        actionType: 'PLAYER_LEAVE' as ActionType,
+        targetSeat: null,
+        targetNickname: null,
+        phase: 'LOBBY',
+        round: 0,
+        detail: { remainingPlayers: state.players.length - 1, wasHost: player.isHost },
+        overridden: false,
+        overrideReason: null,
+        nightActionOrderSnapshot: [...state.config.nightActionOrder],
+      } as ActionLog);
+
       state.players.splice(playerIndex, 1);
 
       // 如果房主离开，转移房主权限
@@ -535,6 +701,25 @@ export class LobbyManager {
         engine.destroy();
         this.rooms.delete(context.roomCode);
       }
+    } else {
+      // 游戏进行中：玩家断线但不移除，记录断线日志
+      this.onLog({
+        id: `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
+        roomCode: state.roomCode,
+        gameId: '',
+        timestamp: Date.now(),
+        actorSeat: player.seatNumber,
+        actorNickname: player.nickname,
+        actionType: 'PLAYER_LEAVE' as ActionType,
+        targetSeat: null,
+        targetNickname: null,
+        phase: state.phase,
+        round: state.round,
+        detail: { disconnected: true, phase: state.phase },
+        overridden: false,
+        overrideReason: null,
+        nightActionOrderSnapshot: [...state.config.nightActionOrder],
+      } as ActionLog);
     }
 
     const roomCode = context.roomCode;
@@ -545,6 +730,52 @@ export class LobbyManager {
     }
 
     return { success: true, roomCode };
+  }
+
+  /**
+   * 法官解散房间 — 销毁房间，返回所有玩家信息供广播
+   */
+  dissolveRoom(playerId: string): { success: boolean; error?: string; roomCode?: string; players?: Array<{ seatNumber: number; nickname: string; role: RoleId; status: PlayerStatus }> } {
+    const context = this.clients.get(playerId);
+    if (!context || !context.roomCode) {
+      return { success: false, error: '你不在任何房间中' };
+    }
+
+    // 验证是法官
+    if (!context.isJudge) {
+      return { success: false, error: '只有法官可以解散房间' };
+    }
+
+    const roomCode = context.roomCode;
+    const engine = this.rooms.get(roomCode);
+    if (!engine) {
+      return { success: false, error: '房间不存在' };
+    }
+
+    const state = engine.getState();
+
+    // 收集所有非法官玩家信息
+    const players = state.players
+      .filter((p) => !p.isJudge)
+      .map((p) => ({
+        seatNumber: p.seatNumber,
+        nickname: p.nickname,
+        role: p.role,
+        status: p.status,
+      }));
+
+    // 销毁房间引擎
+    engine.destroy();
+    this.rooms.delete(roomCode);
+
+    // 清理所有该房间客户端的 roomCode
+    for (const ctx of this.clients.values()) {
+      if (ctx.roomCode === roomCode) {
+        ctx.roomCode = null;
+      }
+    }
+
+    return { success: true, roomCode, players };
   }
 
   /**
@@ -572,6 +803,26 @@ export class LobbyManager {
     }
 
     player.isReady = ready;
+
+    // 记录玩家准备状态变更日志
+    this.onLog({
+      id: `${Date.now()}-${Math.random().toString(36).substring(2, 8)}`,
+      roomCode: state.roomCode,
+      gameId: '',
+      timestamp: Date.now(),
+      actorSeat: player.seatNumber,
+      actorNickname: player.nickname,
+      actionType: 'PLAYER_READY' as ActionType,
+      targetSeat: null,
+      targetNickname: null,
+      phase: 'LOBBY',
+      round: 0,
+      detail: { ready },
+      overridden: false,
+      overrideReason: null,
+      nightActionOrderSnapshot: [...state.config.nightActionOrder],
+    } as ActionLog);
+
     return { success: true };
   }
 
@@ -611,6 +862,53 @@ export class LobbyManager {
    */
   getOnlineCount(): number {
     return this.clients.size;
+  }
+
+  /**
+   * LOBBY 阶段掉线检查
+   * 遍历所有处于 LOBBY 阶段的房间，检查每个玩家是否已断连，
+   * 如果断连则立即移除（不等待宽限期），并返回被移除的玩家信息供广播
+   */
+  checkLobbyDisconnectedPlayers(): Array<{ roomCode: string; playerId: string; seatNumber: number; nickname: string }> {
+    const removed: Array<{ roomCode: string; playerId: string; seatNumber: number; nickname: string }> = [];
+
+    for (const [roomCode, engine] of this.rooms) {
+      const state = engine.getState() as RoomState;
+      // 仅处理 LOBBY 阶段的房间
+      if (state.phase !== 'LOBBY') continue;
+
+      // 收集已断连的玩家
+      const disconnectedPlayers: Player[] = [];
+      for (const player of state.players) {
+        if (player.isJudge) continue;
+        const context = this.clients.get(player.id);
+        if (context && context.disconnected) {
+          disconnectedPlayers.push(player);
+        }
+      }
+
+      // 移除断连玩家
+      for (const player of disconnectedPlayers) {
+        // 清除宽限期定时器
+        const context = this.clients.get(player.id);
+        if (context?.gracePeriodTimer) {
+          clearTimeout(context.gracePeriodTimer);
+          context.gracePeriodTimer = null;
+        }
+
+        removed.push({
+          roomCode,
+          playerId: player.id,
+          seatNumber: player.seatNumber,
+          nickname: player.nickname,
+        });
+
+        // 执行离开逻辑
+        this.leaveRoom(player.id);
+      }
+    }
+
+    return removed;
   }
 
   // ==========================================================================
@@ -702,6 +1000,8 @@ export class LobbyManager {
   private onWolfVoteUpdateCallback: ((roomCode: string, votes: Record<number, number>, consensus: boolean, lockedTarget: number | null) => void) | null = null;
   private onGameEventCallback: ((roomCode: string, eventType: string, data: Record<string, unknown>) => void) | null = null;
   private onNightSubPhaseAdvanceCallback: ((roomCode: string) => void) | null = null;
+  private onNightCountdownCallback: ((roomCode: string, roleId: import('@langrensha/shared').RoleId, remaining: number) => void) | null = null;
+  private onSpeechCountdownCallback: ((roomCode: string, seatNumber: number, remaining: number) => void) | null = null;
   private onDayAnnounceCallback: ((roomCode: string, deaths: Array<{seatNumber: number; nickname: string; cause: string}>, mutedSeats: number[]) => void) | null = null;
   private voteResultCallback: VoteResultCallback = () => {};
   private gameOverCallback: GameOverCallback = () => {};
@@ -764,6 +1064,20 @@ export class LobbyManager {
   }
 
   /**
+   * 设置夜间倒计时广播回调
+   */
+  setNightCountdownCallback(cb: (roomCode: string, roleId: import('@langrensha/shared').RoleId, remaining: number) => void): void {
+    this.onNightCountdownCallback = cb;
+  }
+
+  /**
+   * 设置发言倒计时广播回调
+   */
+  setSpeechCountdownCallback(cb: (roomCode: string, seatNumber: number, remaining: number) => void): void {
+    this.onSpeechCountdownCallback = cb;
+  }
+
+  /**
    * 设置天亮公告回调
    */
   setDayAnnounceCallback(cb: (roomCode: string, deaths: Array<{seatNumber: number; nickname: string; cause: string}>, mutedSeats: number[]) => void): void {
@@ -811,6 +1125,14 @@ export class LobbyManager {
 
   private onNightSubPhaseAdvance(roomCode: string): void {
     this.onNightSubPhaseAdvanceCallback?.(roomCode);
+  }
+
+  private onNightCountdown(roomCode: string, roleId: import('@langrensha/shared').RoleId, remaining: number): void {
+    this.onNightCountdownCallback?.(roomCode, roleId, remaining);
+  }
+
+  private onSpeechCountdown(roomCode: string, seatNumber: number, remaining: number): void {
+    this.onSpeechCountdownCallback?.(roomCode, seatNumber, remaining);
   }
 
   // ==========================================================================

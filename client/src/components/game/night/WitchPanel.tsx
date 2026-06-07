@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import TargetSelector from '../TargetSelector';
+import ConfirmDialog from '../ConfirmDialog';
 
 type WitchStep = 'antidote' | 'poison' | 'done';
 
@@ -26,6 +27,7 @@ export default function WitchPanel() {
   const [step, setStep] = useState<WitchStep>(
     !antidoteUsed ? 'antidote' : !poisonUsed ? 'poison' : 'done'
   );
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   if (!nightActionRequest) return null;
 
@@ -73,7 +75,12 @@ export default function WitchPanel() {
     }
   };
 
-  const handleUsePoison = () => {
+  const handleUsePoisonClick = () => {
+    if (poisonTarget === null || isActionLocked) return;
+    setConfirmOpen(true);
+  };
+
+  const handleUsePoisonConfirm = () => {
     if (poisonTarget === null || isActionLocked) return;
     if (!canUseBothPotions) {
       // 不允许同时用药，使用毒药则放弃解药
@@ -81,6 +88,7 @@ export default function WitchPanel() {
     } else {
       handleSubmit(useAntidote, true, poisonTarget);
     }
+    setConfirmOpen(false);
   };
 
   const handleSkipPoison = () => {
@@ -188,7 +196,7 @@ export default function WitchPanel() {
             <button
               className="btn-primary bg-red-700 hover:bg-red-600 disabled:opacity-50"
               disabled={poisonTarget === null || isActionLocked}
-              onClick={handleUsePoison}
+              onClick={handleUsePoisonClick}
             >
               使用毒药
             </button>
@@ -212,6 +220,16 @@ export default function WitchPanel() {
       {isActionLocked && (
         <div className="mt-3 text-sm text-indigo-400">✓ 操作已提交</div>
       )}
+
+      {/* 毒药二次确认弹窗 */}
+      <ConfirmDialog
+        open={confirmOpen}
+        title="确认使用毒药"
+        message={`确定要对 ${poisonTarget}号 玩家使用毒药吗？此操作不可撤销。`}
+        confirmLabel="使用毒药"
+        onConfirm={handleUsePoisonConfirm}
+        onCancel={() => setConfirmOpen(false)}
+      />
     </div>
   );
 }

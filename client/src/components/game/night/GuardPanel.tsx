@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import TargetSelector from '../TargetSelector';
+import ConfirmDialog from '../ConfirmDialog';
 
 /**
  * 守卫行动面板 — 选择守护目标
@@ -18,6 +19,7 @@ export default function GuardPanel() {
   const round = playerState?.round ?? 1;
 
   const [selected, setSelected] = useState<number | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   if (!nightActionRequest) return null;
 
@@ -31,10 +33,16 @@ export default function GuardPanel() {
     return false;
   });
 
-  const handleConfirm = () => {
+  const handleConfirmClick = () => {
+    if (selected === null || isActionLocked) return;
+    setConfirmOpen(true);
+  };
+
+  const handleConfirmAction = () => {
     if (selected === null || isActionLocked) return;
     submitNightAction('guard', selected, { protectTarget: selected });
     setActionLocked(true);
+    setConfirmOpen(false);
   };
 
   const handleSkip = () => {
@@ -92,13 +100,23 @@ export default function GuardPanel() {
             <button
               className="btn-primary bg-green-700 hover:bg-green-600 disabled:opacity-50"
               disabled={selected === null || isActionLocked}
-              onClick={handleConfirm}
+              onClick={handleConfirmClick}
             >
               {isActionLocked ? '已确认' : '确认守护'}
             </button>
           </div>
         </>
       )}
+
+      {/* 二次确认弹窗 */}
+      <ConfirmDialog
+        open={confirmOpen}
+        title="确认守护"
+        message={`确定要守护 ${selected}号 玩家吗？`}
+        confirmLabel="确认守护"
+        onConfirm={handleConfirmAction}
+        onCancel={() => setConfirmOpen(false)}
+      />
     </div>
   );
 }

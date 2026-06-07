@@ -203,6 +203,10 @@
     @apply border-amber-500 bg-amber-900/20 ring-1 ring-amber-500/30;
   }
 
+  .seat-empty {
+    @apply border-night-800 bg-night-900/50 border-dashed;
+  }
+
   /* 申诉按钮 */
   .appeal-btn {
     @apply fixed bottom-6 right-6 z-40 bg-red-600 hover:bg-red-500 text-white

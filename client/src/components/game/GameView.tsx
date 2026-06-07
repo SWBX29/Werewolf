@@ -31,7 +31,8 @@ import RoleReveal from './RoleReveal';
 import NightPhase from './night/NightPhase';
 import SpeechPhase from './day/SpeechPhase';
 import VotePhase from './day/VotePhase';
-import JudgeElection from './day/JudgeElection';
+import SheriffElection from './day/SheriffElection';
+import SheriffTransfer from './day/SheriffTransfer';
 import DayAnnounce from './day/DayAnnounce';
 import SpectatorMode from './SpectatorMode';
 import AppealButton from './AppealButton';
@@ -41,13 +42,21 @@ import HunterGun from './skills/HunterGun';
 import WolfKingGun from './skills/WolfKingGun';
 import IdiotReveal from './skills/IdiotReveal';
 
+import CountdownTimer from './CountdownTimer';
+
 const GameView: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
   const roleConfirmed = useGameStore((s) => s.roleConfirmed);
   const gameOverData = useGameStore((s) => s.gameOverData);
+  const roomDissolvedData = useGameStore((s) => s.roomDissolvedData);
   const leaveRoom = useGameStore((s) => s.leaveRoom);
   const phaseAnnouncement = useGameStore((s) => s.phaseAnnouncement);
   const dismissAnnouncement = useGameStore((s) => s.dismissAnnouncement);
+
+  // 房间解散 → 显示解散界面（优先级最高）
+  if (roomDissolvedData) {
+    return <RoomDissolved />;
+  }
 
   if (!playerState) {
     return (
@@ -68,8 +77,9 @@ const GameView: React.FC = () => {
   const aliveCount = playerState.players.filter((p) => !p.isJudge && p.status === 'alive').length;
   const totalCount = playerState.players.filter((p) => !p.isJudge).length;
 
-  // 角色未确认 → 显示角色揭示
-  if (!roleConfirmed && myRole) {
+  // 角色未确认且处于身份展示阶段 → 显示角色揭示（自动倒计时，无需点击）
+  // 限定仅在 ROLE_REVEAL 阶段渲染，防止身份展示结束后再次弹出"确认知晓"按钮
+  if (!roleConfirmed && myRole && playerState.phase === 'ROLE_REVEAL') {
     return <RoleReveal />;
   }
 
@@ -85,6 +95,12 @@ const GameView: React.FC = () => {
     switch (phase) {
       case 'LOBBY':
         return <LobbyPanel />;
+
+      case 'ROLE_REVEAL':
+        return <RoleReveal />;
+
+      case 'PRE_NIGHT':
+        return <PreNightWait />;
 
       case 'NIGHT':
       case 'NIGHT_SETTLEMENT':
@@ -110,8 +126,11 @@ const GameView: React.FC = () => {
       case 'PK_VOTE':
         return <VotePhase />;
 
-      case 'JUDGE_ELECTION':
-        return <JudgeElection />;
+      case 'SHERIFF_ELECTION':
+        return <SheriffElection />;
+
+      case 'SHERIFF_TRANSFER':
+        return <SheriffTransfer />;
 
       case 'DAY_SETTLEMENT':
       case 'DAY_INTERRUPT':
@@ -236,12 +255,17 @@ const LobbyPanel: React.FC = () => {
 
   const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
   const isHost = myPlayer?.isHost ?? false;
-  const allReady = playerState.players
-    .filter((p) => !p.isJudge)
-    .every((p) => p.isReady);
-  const playerCount = playerState.players.filter((p) => !p.isJudge).length;
+  const nonJudgePlayers = playerState.players.filter((p) => !p.isJudge);
+  const allReady = nonJudgePlayers.every((p) => p.isReady);
+  const playerCount = nonJudgePlayers.length;
+  const totalSeats = playerState.playerCount;
   const hasJudge = playerState.players.some((p) => p.isJudge);
-  const enoughPlayers = playerCount >= 6;
+  const enoughPlayers = playerCount >= totalSeats;
+
+  // 构建座位号 → 玩家映射
+  const playerBySeat = new Map<number, typeof nonJudgePlayers[number]>();
+  nonJudgePlayers.forEach((p) => playerBySeat.set(p.seatNumber, p));
+  const allSeats = Array.from({ length: totalSeats }, (_, i) => i + 1);
 
   return (
     <div className="flex-1 flex items-center justify-center p-4">
@@ -251,14 +275,30 @@ const LobbyPanel: React.FC = () => {
           房间码：<span className="font-mono text-white text-lg">{playerState.roomCode}</span>
         </p>
         <p className="text-sm text-gray-500">
-          当前 {playerCount} 名玩家
+          当前 {playerCount}/{totalSeats} 名玩家
         </p>
 
         {/* 玩家列表 */}
         <div className="space-y-1">
-          {playerState.players
-            .filter((p) => !p.isJudge)
-            .map((p) => (
+          {allSeats.map((seatNumber) => {
+            const p = playerBySeat.get(seatNumber);
+
+            // 空座位占位
+            if (!p) {
+              return (
+                <div
+                  key={seatNumber}
+                  className="flex items-center justify-between px-3 py-2 rounded-lg bg-night-900/30 opacity-40"
+                >
+                  <span className="text-sm text-gray-600">
+                    {seatNumber}号 等待加入
+                  </span>
+                  <span className="text-xs text-gray-600">空座位</span>
+                </div>
+              );
+            }
+
+            return (
               <div
                 key={p.id}
                 className={`flex items-center justify-between px-3 py-2 rounded-lg ${
@@ -274,7 +314,8 @@ const LobbyPanel: React.FC = () => {
                   {p.isReady ? '已准备' : '未准备'}
                 </span>
               </div>
-            ))}
+            );
+          })}
         </div>
 
         {/* 操作按钮 */}
@@ -321,7 +362,6 @@ const LobbyPanel: React.FC = () => {
 const InterruptPanel: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
   const knightDuelResult = useGameStore((s) => s.knightDuelResult);
-  const phaseAnnouncement = useGameStore((s) => s.phaseAnnouncement);
   const voteResult = useGameStore((s) => s.voteResult);
 
   const isSettlement = playerState?.phase === 'DAY_SETTLEMENT';
@@ -333,10 +373,6 @@ const InterruptPanel: React.FC = () => {
         <h2 className="text-xl font-bold text-amber-400">
           {isSettlement ? '白天结算' : '白天中断'}
         </h2>
-
-        {phaseAnnouncement && (
-          <p className="text-gray-300">{phaseAnnouncement}</p>
-        )}
 
         {/* 投票结果显示 */}
         {isSettlement && voteResult && (
@@ -384,4 +420,93 @@ const InterruptPanel: React.FC = () => {
   );
 };
 
+// ============================================================================
+// 入夜前等待面板
+// ============================================================================
+
+const PreNightWait: React.FC = () => {
+  const playerState = useGameStore((s) => s.playerState);
+  const phaseTimeRemaining = useGameStore((s) => s.phaseTimeRemaining);
+
+  const round = (playerState?.round ?? 0) + 1;
+  const preNightHint = (playerState as any)?.preNightHint ?? null;
+
+  return (
+    <div className="flex-1 flex items-center justify-center p-4 bg-night-phase">
+      <div className="card max-w-md w-full text-center space-y-4 animate-fade-in-up">
+        <div className="text-4xl animate-float">🌙</div>
+        <h2 className="text-xl font-bold text-indigo-300">
+          第 {round} 夜即将到来
+        </h2>
+        <p className="text-sm text-gray-400">天黑请闭眼...</p>
+        {preNightHint && (
+          <div className="p-3 rounded-lg bg-wolf-900/30 border border-wolf-700">
+            <p className="text-sm text-wolf-300">⚠️ {preNightHint}</p>
+          </div>
+        )}
+        <div className="w-48 mx-auto">
+          <CountdownTimer seconds={5} />
+        </div>
+      </div>
+    </div>
+  );
+};
+
 export default GameView;
+
+// ============================================================================
+// 房间解散界面 — 法官解散房间后展示所有已知信息
+// ============================================================================
+
+const RoomDissolved: React.FC = () => {
+  const roomDissolvedData = useGameStore((s) => s.roomDissolvedData);
+  const leaveRoom = useGameStore((s) => s.leaveRoom);
+
+  if (!roomDissolvedData) return null;
+
+  const { reason, players } = roomDissolvedData;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 animate-fade-in-up">
+      <div className="card max-w-lg w-full mx-4 space-y-6 text-center">
+        <div className="text-5xl">🚪</div>
+
+        <h2 className="text-2xl font-bold text-red-400">房间已解散</h2>
+
+        <p className="text-sm text-gray-400">{reason}</p>
+
+        {/* 玩家信息列表 */}
+        {players.length > 0 && (
+          <div className="space-y-2 text-left">
+            <h4 className="text-sm font-semibold text-amber-300">本局玩家信息</h4>
+            <div className="max-h-64 overflow-y-auto space-y-1">
+              {players
+                .sort((a, b) => a.seatNumber - b.seatNumber)
+                .map((p) => (
+                  <div
+                    key={p.seatNumber}
+                    className="flex items-center gap-2 px-3 py-1.5 rounded text-sm bg-night-800"
+                  >
+                    <span className="font-mono w-8">{p.seatNumber}号</span>
+                    <span className="flex-1 truncate">{p.nickname}</span>
+                    {p.role && (
+                      <span className={`tag ${ROLE_META[p.role as keyof typeof ROLE_META]?.faction === 'evil' ? 'tag-evil' : 'tag-good'}`}>
+                        {ROLE_META[p.role as keyof typeof ROLE_META]?.name ?? p.role}
+                      </span>
+                    )}
+                    <span className={`text-xs ${p.status === 'alive' ? 'text-green-400' : 'text-gray-500'}`}>
+                      {p.status === 'alive' ? '存活' : '已死亡'}
+                    </span>
+                  </div>
+                ))}
+            </div>
+          </div>
+        )}
+
+        <button className="btn-primary w-full" onClick={leaveRoom}>
+          返回大厅
+        </button>
+      </div>
+    </div>
+  );
+};

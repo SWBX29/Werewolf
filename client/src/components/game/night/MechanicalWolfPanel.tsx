@@ -3,6 +3,7 @@ import { useGameStore } from '../../../useGameStore';
 import { ROLE_META } from '@langrensha/shared';
 import type { RoleId } from '@langrensha/shared';
 import TargetSelector from '../TargetSelector';
+import ConfirmDialog from '../ConfirmDialog';
 
 /**
  * 机械狼行动面板 — 模仿选择 / 模仿技能使用
@@ -23,6 +24,8 @@ export default function MechanicalWolfPanel() {
   const skillDeferred = myPlayer?.mechanicalWolfSkillDeferred ?? false;
 
   const [selected, setSelected] = useState<number | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmAction, setConfirmAction] = useState<(() => void) | null>(null);
 
   if (!nightActionRequest) return null;
 
@@ -59,10 +62,13 @@ export default function MechanicalWolfPanel() {
 
   // ---- 选择模仿目标（首夜） ----
   if (mechPhase === 'selecting') {
-    const handleConfirm = () => {
+    const handleConfirmClick = () => {
       if (selected === null || isActionLocked) return;
-      submitNightAction('mechanical_wolf', selected, { imitateTarget: selected });
-      setActionLocked(true);
+      setConfirmAction(() => () => {
+        submitNightAction('mechanical_wolf', selected, { imitateTarget: selected });
+        setActionLocked(true);
+      });
+      setConfirmOpen(true);
     };
 
     return (
@@ -93,11 +99,24 @@ export default function MechanicalWolfPanel() {
           <button
             className="btn-primary bg-cyan-700 hover:bg-cyan-600 disabled:opacity-50"
             disabled={selected === null || isActionLocked}
-            onClick={handleConfirm}
+            onClick={handleConfirmClick}
           >
             {isActionLocked ? '已确认' : '确认模仿'}
           </button>
         </div>
+
+        {/* 二次确认弹窗 */}
+        <ConfirmDialog
+          open={confirmOpen}
+          title="确认操作"
+          message={`确定要对 ${selected}号 玩家执行此操作吗？`}
+          confirmLabel="确认"
+          onConfirm={() => {
+            confirmAction?.();
+            setConfirmOpen(false);
+          }}
+          onCancel={() => setConfirmOpen(false)}
+        />
       </div>
     );
   }
@@ -122,10 +141,13 @@ export default function MechanicalWolfPanel() {
     }
 
     // 模仿预言家/女巫/守卫：展示对应技能面板
-    const handleSkillConfirm = () => {
+    const handleSkillConfirmClick = () => {
       if (selected === null || isActionLocked) return;
-      submitNightAction('mechanical_wolf', selected, { imitateSkillTarget: selected });
-      setActionLocked(true);
+      setConfirmAction(() => () => {
+        submitNightAction('mechanical_wolf', selected, { imitateSkillTarget: selected });
+        setActionLocked(true);
+      });
+      setConfirmOpen(true);
     };
 
     // 根据模仿角色显示不同的面板样式和提示
@@ -185,11 +207,24 @@ export default function MechanicalWolfPanel() {
           <button
             className="btn-primary bg-cyan-700 hover:bg-cyan-600 disabled:opacity-50"
             disabled={selected === null || isActionLocked}
-            onClick={handleSkillConfirm}
+            onClick={handleSkillConfirmClick}
           >
             {isActionLocked ? '已确认' : `确认${config.action}`}
           </button>
         </div>
+
+        {/* 二次确认弹窗 */}
+        <ConfirmDialog
+          open={confirmOpen}
+          title="确认操作"
+          message={`确定要对 ${selected}号 玩家执行此操作吗？`}
+          confirmLabel="确认"
+          onConfirm={() => {
+            confirmAction?.();
+            setConfirmOpen(false);
+          }}
+          onCancel={() => setConfirmOpen(false)}
+        />
       </div>
     );
   }

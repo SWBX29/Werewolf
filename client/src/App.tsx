@@ -22,14 +22,24 @@ import GameView from './components/game/GameView';
 // ============================================================================
 
 const App: React.FC = () => {
-  const { currentView, isConnected, isReconnecting, isJudge, error, dismissError } = useGameStore();
+  const { currentView, isConnected, isReconnecting, reconnectAttempts, isJudge, error, dismissError, manualReconnect } = useGameStore();
 
   // 初始化 WebSocket 连接
   useEffect(() => {
-    if (!isConnected) {
+    if (!isConnected && !isReconnecting) {
       useGameStore.getState().connect(getWsUrl());
     }
   }, []);
+
+  // 错误弹窗自动关闭（5秒后）
+  useEffect(() => {
+    if (error) {
+      const timer = setTimeout(() => {
+        dismissError();
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [error, dismissError]);
 
   return (
     <div className="min-h-screen bg-night-950">
@@ -46,8 +56,49 @@ const App: React.FC = () => {
             }`}
           />
           <span className="text-xs text-gray-500">
-            {isConnected ? '已连接' : isReconnecting ? '重连中' : '未连接'}
+            {isConnected ? '已连接' : isReconnecting ? `重连中(${reconnectAttempts})` : '未连接'}
           </span>
+          {!isConnected && !isReconnecting && (
+            <button
+              onClick={manualReconnect}
+              className="text-xs text-blue-400 hover:text-blue-300 underline"
+            >
+              重新连接
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* 游戏中断连重连弹窗 */}
+      {currentView === 'game' && !isConnected && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm">
+          <div className="card max-w-sm w-full mx-4 text-center space-y-4 animate-fade-in-up">
+            <div className="text-4xl">🔌</div>
+            <h2 className="text-xl font-bold text-gray-100">连接已断开</h2>
+            {isReconnecting ? (
+              <>
+                <p className="text-sm text-gray-400">正在自动重连，请稍候...</p>
+                <div className="flex items-center justify-center gap-1">
+                  <span className="w-2 h-2 rounded-full bg-yellow-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <span className="w-2 h-2 rounded-full bg-yellow-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <span className="w-2 h-2 rounded-full bg-yellow-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+                </div>
+                {reconnectAttempts > 0 && (
+                  <p className="text-xs text-gray-500">已尝试 {reconnectAttempts} 次</p>
+                )}
+              </>
+            ) : (
+              <>
+                <p className="text-sm text-gray-400">自动重连未成功</p>
+                <button
+                  onClick={manualReconnect}
+                  className="btn-primary w-full"
+                >
+                  重新连接
+                </button>
+              </>
+            )}
+          </div>
         </div>
       )}
 

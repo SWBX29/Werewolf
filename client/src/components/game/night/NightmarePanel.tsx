@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import TargetSelector from '../TargetSelector';
+import ConfirmDialog from '../ConfirmDialog';
 
 /**
  * 噩梦之影行动面板 — 恐惧目标选择
@@ -17,13 +18,20 @@ export default function NightmarePanel() {
   const mySeat = myPlayer?.seatNumber ?? 0;
 
   const [selected, setSelected] = useState<number | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   if (!nightActionRequest) return null;
 
-  const handleConfirm = () => {
+  const handleConfirmClick = () => {
+    if (selected === null || isActionLocked) return;
+    setConfirmOpen(true);
+  };
+
+  const handleConfirmAction = () => {
     if (selected === null || isActionLocked) return;
     submitNightAction('nightmare_shadow', selected, { nightmareTarget: selected });
     setActionLocked(true);
+    setConfirmOpen(false);
   };
 
   return (
@@ -57,11 +65,21 @@ export default function NightmarePanel() {
         <button
           className="btn-primary"
           disabled={selected === null || isActionLocked}
-          onClick={handleConfirm}
+          onClick={handleConfirmClick}
         >
           {isActionLocked ? '已确认' : '确认恐惧'}
         </button>
       </div>
+
+      {/* 二次确认弹窗 */}
+      <ConfirmDialog
+        open={confirmOpen}
+        title="确认恐惧"
+        message={`确定要对 ${selected}号 玩家施以恐惧吗？`}
+        confirmLabel="确认恐惧"
+        onConfirm={handleConfirmAction}
+        onCancel={() => setConfirmOpen(false)}
+      />
     </div>
   );
 }

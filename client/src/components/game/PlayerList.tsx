@@ -27,7 +27,16 @@ export default function PlayerList({ compact = false }: PlayerListProps) {
 
   const phase = isJudge ? judgeState!.phase : playerState!.phase;
 
-  // 找到自己的玩家（法官模式下无 myPlayerId，不需要定位自己）
+  // 总座位数（始终显示所有座位号，即使对应座位暂无玩家）
+  const totalSeats = isJudge
+    ? judgeState!.config.playerCount
+    : playerState!.playerCount;
+
+  // 构建座位号 → 玩家映射
+  const playerBySeat = new Map<number, PlayerDTO>();
+  players.filter((p) => !p.isJudge).forEach((p) => playerBySeat.set(p.seatNumber, p));
+
+  // 自己的玩家（法官模式下无 myPlayerId，不需要定位自己）
   const myPlayer = (!isJudge && playerState) ? players.find((p) => p.id === playerState.myPlayerId) : undefined;
 
   // 当前正在发言的座位号（仅白天发言阶段显示）
@@ -39,10 +48,28 @@ export default function PlayerList({ compact = false }: PlayerListProps) {
 
   const gridCols = compact ? 'grid-cols-6' : 'grid-cols-4';
 
+  // 生成所有座位号（1 ~ totalSeats），按号数由小到大排列
+  const allSeats = Array.from({ length: totalSeats }, (_, i) => i + 1);
+
   return (
     <div className="relative">
       <div className={`grid ${gridCols} gap-2`}>
-        {players.filter((p) => !p.isJudge).map((p) => {
+        {allSeats.map((seatNumber) => {
+          const p = playerBySeat.get(seatNumber);
+
+          // 空座位占位
+          if (!p) {
+            return (
+              <div key={seatNumber} className="seat-cell seat-empty opacity-30">
+                <span className="text-xs font-bold text-gray-600">{seatNumber}号</span>
+                <span className="text-sm truncate max-w-full text-gray-600">
+                  {compact ? '空位' : '空座位'}
+                </span>
+                <div className="flex items-center gap-1" />
+              </div>
+            );
+          }
+
           const isDead = p.status === 'dead' || p.status === 'poisoned' || p.status === 'voted_out';
           const isSelf = myPlayer?.seatNumber === p.seatNumber;
           const isSpeaking = speakingSeat === p.seatNumber;
@@ -76,6 +103,7 @@ export default function PlayerList({ compact = false }: PlayerListProps) {
               <div className="flex items-center gap-1">
                 {isDead && <span className="text-xs text-gray-600">💀</span>}
                 {p.idiotRevealed && !isDead && <span className="text-xs">🃏</span>}
+                {p.isSheriff && !isDead && <span className="text-xs">⭐</span>}
                 {isMuted && <span className="text-xs">🔇</span>}
                 {isSpeaking && !isDead && (
                   <span className="text-xs text-amber-400">🎤</span>
