@@ -13,6 +13,7 @@ const SpeechPhase: React.FC = () => {
   const isActionLocked = useGameStore((s) => s.isActionLocked);
   const dayAnnouncement = useGameStore((s) => s.dayAnnouncement);
   const dismissDayAnnouncement = useGameStore((s) => s.dismissDayAnnouncement);
+  const speechTimeRemaining = useGameStore((s) => s.speechTimeRemaining);
 
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -26,17 +27,30 @@ const SpeechPhase: React.FC = () => {
   const [lastWordsInput, setLastWordsInput] = useState('');
   const [lastWordsSubmitted, setLastWordsSubmitted] = useState(false);
 
-  // 天亮公告自动消失
-  const [announceVisible, setAnnounceVisible] = useState(true);
+  // 天亮公告：5秒倒计时全屏覆盖 → 倒计时结束后显示内联摘要
+  const [showDawnOverlay, setShowDawnOverlay] = useState(false);
+  const [dawnCountdown, setDawnCountdown] = useState(5);
+  const [showNightSummary, setShowNightSummary] = useState(false);
+
+  // 当 dayAnnouncement 到达时，启动全屏倒计时
   useEffect(() => {
     if (!dayAnnouncement) return;
-    setAnnounceVisible(true);
-    const timer = setTimeout(() => {
-      setAnnounceVisible(false);
-      dismissDayAnnouncement();
-    }, 6000);
+    setShowDawnOverlay(true);
+    setShowNightSummary(false);
+    setDawnCountdown(5);
+  }, [dayAnnouncement]);
+
+  // 5秒倒计时
+  useEffect(() => {
+    if (!showDawnOverlay) return;
+    if (dawnCountdown <= 0) {
+      setShowDawnOverlay(false);
+      setShowNightSummary(true);
+      return;
+    }
+    const timer = setTimeout(() => setDawnCountdown((c) => c - 1), 1000);
     return () => clearTimeout(timer);
-  }, [dayAnnouncement, dismissDayAnnouncement]);
+  }, [showDawnOverlay, dawnCountdown]);
 
   if (!playerState) return null;
 
@@ -48,6 +62,9 @@ const SpeechPhase: React.FC = () => {
   const { speechOrder, currentSpeakerIndex, players } = playerState;
   const currentSpeakerSeat = speechOrder[currentSpeakerIndex] ?? null;
   const isMyTurn = currentSpeakerSeat === mySeat;
+
+  // 使用服务端同步的倒计时，若未启用则回退到本地配置值
+  const speechCountdownSeconds = speechTimeRemaining > 0 ? speechTimeRemaining : ruleConfig.speechTimeout;
 
   const isKnight = myPlayer?.role === 'knight';
   const isWhiteWolfKing = myPlayer?.role === 'white_wolf_king';
@@ -145,9 +162,49 @@ const SpeechPhase: React.FC = () => {
         </span>
       </div>
 
-      {/* 天亮公告内联面板 — 与发言界面合并显示 */}
-      {dayAnnouncement && announceVisible && (
-        <div className="animate-fade-in-up relative">
+      {/* ===== 全屏"天亮了"覆盖层（5秒倒计时） ===== */}
+      {dayAnnouncement && showDawnOverlay && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-gradient-to-b from-amber-900/90 to-black/90 animate-fade-in-up">
+          <div className="max-w-md w-full mx-4 text-center space-y-5">
+            <h2 className="text-3xl font-bold text-amber-300 drop-shadow-lg">🌅 天亮了</h2>
+
+            {/* 死亡结果 */}
+            <div className="space-y-2">
+              {dayAnnouncement.deaths.length > 0 ? (
+                <div className="space-y-1">
+                  <p className="text-lg text-red-400 font-semibold">昨晚出局的是——</p>
+                  {dayAnnouncement.deaths.map((d) => (
+                    <p key={d.seatNumber} className="text-xl text-red-300 font-bold">
+                      {d.seatNumber}号玩家 {d.nickname}
+                    </p>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xl text-green-400 font-bold">昨晚是平安夜</p>
+              )}
+            </div>
+
+            {/* 禁言信息 */}
+            {dayAnnouncement.mutedSeats.length > 0 && (
+              <p className="text-sm text-yellow-400">
+                🔇 {dayAnnouncement.mutedSeats.map((s) => `${s}号`).join('、')} 被禁言
+              </p>
+            )}
+
+            {/* 倒计时 */}
+            <div className="mt-6">
+              <div className="inline-flex items-center justify-center w-16 h-16 rounded-full border-4 border-amber-500 text-3xl font-bold text-amber-300">
+                {dawnCountdown}
+              </div>
+              <p className="text-xs text-gray-400 mt-2">即将进入发言阶段...</p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ===== 昨晚情况摘要（发言阶段持久显示） ===== */}
+      {dayAnnouncement && showNightSummary && (
+        <div className="animate-fade-in-up">
           <div className={`p-3 rounded-lg border ${
             dayAnnouncement.deaths.length > 0
               ? 'bg-red-950/30 border-red-800'
@@ -155,37 +212,29 @@ const SpeechPhase: React.FC = () => {
           }`}>
             <div className="flex items-start justify-between">
               <div className="space-y-1">
-                {/* 标题 */}
-                <p className={`font-bold ${dayAnnouncement.deaths.length > 0 ? 'text-red-400' : 'text-green-400'}`}>
-                  🌅 天亮了
+                <p className={`font-bold text-sm ${dayAnnouncement.deaths.length > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                  🌅 昨晚情况
                 </p>
-
-                {/* 死亡名单 */}
                 {dayAnnouncement.deaths.length > 0 ? (
                   <div className="space-y-0.5">
-                    <p className="text-sm text-red-300 font-semibold">昨晚出局的是——</p>
                     {dayAnnouncement.deaths.map((d) => (
                       <p key={d.seatNumber} className="text-sm text-red-200">
-                        {d.seatNumber}号玩家 {d.nickname}
+                        {d.seatNumber}号 {d.nickname} 出局
                       </p>
                     ))}
                   </div>
                 ) : (
-                  <p className="text-sm text-green-300 font-semibold">昨晚是平安夜</p>
+                  <p className="text-sm text-green-300">平安夜</p>
                 )}
-
-                {/* 禁言信息 */}
                 {dayAnnouncement.mutedSeats.length > 0 && (
                   <p className="text-sm text-yellow-400">
-                    🔇 {dayAnnouncement.mutedSeats.map((s) => `${s}号`).join('、')} 被禁言
+                    🔇 {dayAnnouncement.mutedSeats.map((s) => `${s}号`).join('、')} 禁言
                   </p>
                 )}
               </div>
-
-              {/* 关闭按钮 */}
               <button
-                onClick={() => { setAnnounceVisible(false); dismissDayAnnouncement(); }}
-                className="text-gray-500 hover:text-gray-300 ml-2 flex-shrink-0"
+                onClick={() => setShowNightSummary(false)}
+                className="text-gray-500 hover:text-gray-300 ml-2 flex-shrink-0 text-sm"
               >
                 ✕
               </button>
@@ -232,7 +281,7 @@ const SpeechPhase: React.FC = () => {
               </p>
             </div>
           </div>
-          <CountdownTimer seconds={ruleConfig.speechTimeout} urgentThreshold={10} />
+          <CountdownTimer seconds={speechCountdownSeconds} urgentThreshold={10} />
         </div>
       )}
 
@@ -328,7 +377,7 @@ const SpeechPhase: React.FC = () => {
       {needLastWords && !lastWordsSubmitted && (
         <div className="space-y-2 p-3 bg-gray-900/50 rounded-lg border border-gray-700 animate-fade-in-up">
           <p className="text-sm text-gray-300 font-semibold text-center">📝 请发表遗言</p>
-          <CountdownTimer seconds={ruleConfig.speechTimeout} urgentThreshold={10} />
+          <CountdownTimer seconds={speechCountdownSeconds} urgentThreshold={10} />
           <div className="flex gap-2">
             <input
               type="text"

@@ -3,12 +3,12 @@ import { useGameStore } from '../../../useGameStore';
 import TargetSelector from '../TargetSelector';
 import CountdownTimer from '../CountdownTimer';
 
-/** 选举法官（警长）界面组件 */
-const JudgeElection: React.FC = () => {
+/** 选举警长界面组件 */
+const SheriffElection: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
   const isActionLocked = useGameStore((s) => s.isActionLocked);
   const ruleConfig = useGameStore((s) => s.ruleConfig);
-  const submitJudgeElectionVote = useGameStore((s) => s.submitJudgeElectionVote);
+  const submitSheriffElectionVote = useGameStore((s) => s.submitSheriffElectionVote);
   const phaseAnnouncement = useGameStore((s) => s.phaseAnnouncement);
 
   const [selectedSeat, setSelectedSeat] = useState<number | null>(null);
@@ -20,11 +20,11 @@ const JudgeElection: React.FC = () => {
   const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
   const mySeat = myPlayer?.seatNumber ?? 0;
 
-  // 候选人：所有存活且非法官的玩家
+  // 候选人：所有存活且非警长的玩家
   const candidates = useMemo(
     () =>
       playerState.players.filter(
-        (p) => p.status === 'alive' && !p.isJudge,
+        (p) => p.status === 'alive' && !p.isSheriff,
       ),
     [playerState.players],
   );
@@ -52,7 +52,7 @@ const JudgeElection: React.FC = () => {
 
   // 确认投票
   const confirmVote = () => {
-    submitJudgeElectionVote(confirmTarget);
+    submitSheriffElectionVote(confirmTarget);
     setShowConfirm(false);
   };
 
@@ -62,26 +62,13 @@ const JudgeElection: React.FC = () => {
     setConfirmTarget(null);
   };
 
-  // 选举结果展示（由 phaseAnnouncement 展示）
-  const renderElectionResult = () => {
-    if (!phaseAnnouncement) return null;
-
-    return (
-      <div className="space-y-4 mt-4 animate-fade-in-up">
-        <div className="p-3 bg-yellow-900/30 rounded-lg border-2 border-yellow-500 animate-fade-in-up">
-          <p className="text-yellow-300 font-bold text-lg text-center">
-            {phaseAnnouncement}
-          </p>
-        </div>
-      </div>
-    );
-  };
+  // 选举结果由 GameView 顶部横幅统一展示，此处仅控制投票 UI 显隐
 
   return (
     <div className="vote-panel p-4 space-y-4">
       {/* 顶部标题 */}
       <div className="flex items-center justify-between">
-        <h3 className="text-lg font-bold text-amber-300">选举法官</h3>
+        <h3 className="text-lg font-bold text-amber-300">选举警长</h3>
         {!phaseAnnouncement && !isActionLocked && (
           <CountdownTimer
             seconds={ruleConfig.voteTimeout}
@@ -90,9 +77,9 @@ const JudgeElection: React.FC = () => {
         )}
       </div>
 
-      {/* 法官特权说明 */}
+      {/* 警长特权说明 */}
       <div className="text-xs text-amber-400/60 bg-amber-900/10 rounded px-3 py-1.5 border border-amber-800/30">
-        当选法官后，发言顺序可由法官决定
+        当选警长后，发言顺序可由警长决定，投票时拥有 {ruleConfig.sheriffVoteWeight} 票权重
       </div>
 
       {/* 候选人选择（未锁定且无结果时显示） */}
@@ -127,8 +114,10 @@ const JudgeElection: React.FC = () => {
         <p className="text-center text-gray-400">已提交投票，等待其他玩家...</p>
       )}
 
-      {/* 选举结果 */}
-      {renderElectionResult()}
+      {/* 选举结果已出，等待下一阶段 */}
+      {phaseAnnouncement && (
+        <p className="text-center text-gray-400 text-sm">等待下一阶段...</p>
+      )}
 
       {/* 确认对话框 */}
       {showConfirm && (
@@ -136,7 +125,7 @@ const JudgeElection: React.FC = () => {
           <div className="card max-w-sm w-full mx-4 space-y-4 animate-fade-in-up">
             <p className="text-center text-lg font-semibold">
               {confirmTarget !== null
-                ? `确定投票给 ${confirmTarget}号 ${getPlayerName(confirmTarget)} 当选法官吗？`
+                ? `确定投票给 ${confirmTarget}号 ${getPlayerName(confirmTarget)} 当选警长吗？`
                 : '确定弃权吗？'}
             </p>
             <div className="flex gap-3">
@@ -154,4 +143,4 @@ const JudgeElection: React.FC = () => {
   );
 };
 
-export default JudgeElection;
+export default SheriffElection;

@@ -8,6 +8,8 @@ import CountdownTimer from './CountdownTimer';
  */
 const PHASE_NAMES: Record<GamePhase, string> = {
   LOBBY: '大厅等待',
+  ROLE_REVEAL: '身份展示',
+  PRE_NIGHT: '入夜等待',
   NIGHT: '天黑请闭眼',
   NIGHT_SETTLEMENT: '夜间结算中',
   DAY_ANNOUNCE: '天亮了',
@@ -16,7 +18,8 @@ const PHASE_NAMES: Record<GamePhase, string> = {
   DAY_SETTLEMENT: '白天结算中',
   DAY_INTERRUPT: '白天中断',
   PK_VOTE: 'PK投票',
-  JUDGE_ELECTION: '法官选举',
+  SHERIFF_ELECTION: '警长选举',
+  SHERIFF_TRANSFER: '警徽移交',
   GAME_OVER: '游戏结束',
 };
 
@@ -49,6 +52,8 @@ export default function StatusBar() {
   const phaseTimeRemaining = useGameStore((s) => s.phaseTimeRemaining);
   const isConnected = useGameStore((s) => s.isConnected);
   const isReconnecting = useGameStore((s) => s.isReconnecting);
+  const reconnectAttempts = useGameStore((s) => s.reconnectAttempts);
+  const manualReconnect = useGameStore((s) => s.manualReconnect);
   const judgeState = useGameStore((s) => s.judgeState);
   const isJudge = useGameStore((s) => s.isJudge);
 
@@ -88,13 +93,13 @@ export default function StatusBar() {
 
   // 网络状态指示灯
   const networkDot = isReconnecting
-    ? 'bg-yellow-400'
+    ? 'bg-yellow-400 animate-pulse'
     : isConnected
       ? 'bg-green-400'
       : 'bg-red-500';
 
   const networkTitle = isReconnecting
-    ? '重连中...'
+    ? `重连中(${reconnectAttempts})...`
     : isConnected
       ? '已连接'
       : '已断开';
@@ -126,6 +131,14 @@ export default function StatusBar() {
       <div className="flex-shrink-0 flex items-center gap-1.5" title={networkTitle}>
         <span className={`w-2 h-2 rounded-full ${networkDot}`} />
         <span className="text-xs text-gray-500">{networkTitle}</span>
+        {!isConnected && !isReconnecting && (
+          <button
+            onClick={manualReconnect}
+            className="text-xs text-blue-400 hover:text-blue-300 underline ml-1"
+          >
+            重连
+          </button>
+        )}
       </div>
     </div>
   );

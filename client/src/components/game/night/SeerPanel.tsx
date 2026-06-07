@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import TargetSelector from '../TargetSelector';
+import ConfirmDialog from '../ConfirmDialog';
 
 /**
  * 预言家行动面板 — 查验目标阵营
@@ -19,13 +20,20 @@ export default function SeerPanel() {
   const mySeat = myPlayer?.seatNumber ?? 0;
 
   const [selected, setSelected] = useState<number | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
 
   if (!nightActionRequest) return null;
 
-  const handleConfirm = () => {
+  const handleConfirmClick = () => {
+    if (selected === null || isActionLocked) return;
+    setConfirmOpen(true);
+  };
+
+  const handleConfirmAction = () => {
     if (selected === null || isActionLocked) return;
     submitNightAction('seer', selected, { checkTarget: selected });
     setActionLocked(true);
+    setConfirmOpen(false);
   };
 
   // 查验结果到达时显示
@@ -95,7 +103,7 @@ export default function SeerPanel() {
             <button
               className="btn-primary"
               disabled={selected === null || isActionLocked}
-              onClick={handleConfirm}
+              onClick={handleConfirmClick}
             >
               确认查验
             </button>
@@ -109,6 +117,16 @@ export default function SeerPanel() {
           等待查验结果……
         </div>
       )}
+
+      {/* 二次确认弹窗 */}
+      <ConfirmDialog
+        open={confirmOpen}
+        title="确认查验"
+        message={`确定要查验 ${selected}号 玩家的阵营吗？`}
+        confirmLabel="确认查验"
+        onConfirm={handleConfirmAction}
+        onCancel={() => setConfirmOpen(false)}
+      />
     </div>
   );
 }

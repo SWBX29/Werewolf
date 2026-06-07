@@ -1,6 +1,8 @@
+import { useState, useEffect } from 'react';
 import { useGameStore } from '../../useGameStore';
 import type { RoleId } from '@langrensha/shared';
 import { ROLE_META } from '@langrensha/shared';
+import CountdownTimer from './CountdownTimer';
 
 /**
  * 角色 emoji 映射
@@ -48,9 +50,9 @@ export default function RoleReveal() {
   const playerState = useGameStore((s) => s.playerState);
   const roleConfirmed = useGameStore((s) => s.roleConfirmed);
   const confirmRole = useGameStore((s) => s.confirmRole);
+  const phase = playerState?.phase;
 
-  // 已确认或无玩家状态则不显示
-  if (roleConfirmed || !playerState) return null;
+  if (!playerState) return null;
 
   // 找到自己的玩家
   const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
@@ -61,6 +63,9 @@ export default function RoleReveal() {
   const emoji = ROLE_EMOJI[roleId];
   const flavor = FLAVOR_TEXT[roleId];
   const isEvil = meta.faction === 'evil';
+
+  // ROLE_REVEAL阶段由服务端倒计时驱动，其他阶段由客户端确认按钮驱动
+  const isAutoPhase = phase === 'ROLE_REVEAL';
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 backdrop-blur-sm">
@@ -82,13 +87,22 @@ export default function RoleReveal() {
         {/* 风味文本 */}
         <p className="text-sm text-gray-500 mt-3 italic">"{flavor}"</p>
 
-        {/* 确认按钮 */}
-        <button
-          className="btn-primary mt-6 w-full"
-          onClick={confirmRole}
-        >
-          确认知晓
-        </button>
+        {/* 确认按钮或倒计时 */}
+        {isAutoPhase ? (
+          <div className="mt-6">
+            <p className="text-xs text-gray-500 mb-2">即将进入夜晚...</p>
+            <div className="w-48 mx-auto">
+              <CountdownTimer seconds={5} />
+            </div>
+          </div>
+        ) : (
+          <button
+            className="btn-primary mt-6 w-full"
+            onClick={confirmRole}
+          >
+            确认知晓
+          </button>
+        )}
       </div>
     </div>
   );

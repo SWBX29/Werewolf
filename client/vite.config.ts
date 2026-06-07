@@ -5,7 +5,6 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5180,
-    strictPort: true,
     // 开发环境 WebSocket 代理到后端
     proxy: {
       '/ws': {

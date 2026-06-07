@@ -146,6 +146,7 @@ function stripPlayerToDTO(player: Player, forPlayerId: string | null, engine?: G
     seatNumber: player.seatNumber,
     status: player.status,
     isJudge: player.isJudge,
+    isSheriff: player.isSheriff,
     isHost: player.isHost,
     isReady: player.isReady,
     isMuted: player.isMuted,
@@ -183,6 +184,7 @@ function buildPlayerRoomStateDTO(state: RoomState, forPlayerId: string, engine: 
     gameMode: state.gameMode,
     phase: state.phase,
     round: state.round,
+    playerCount: state.config.playerCount,
     myPlayerId: forPlayerId,
     players: state.players.map((p) => stripPlayerToDTO(p, forPlayerId, engine, player, state.phase)),
     speechOrder: state.speechOrder,
@@ -198,6 +200,34 @@ function buildPlayerRoomStateDTO(state: RoomState, forPlayerId: string, engine: 
     wolfVoteConsensus: (state.phase === 'NIGHT' && state.nightSubPhase?.currentRole === 'werewolf' && isSharedWolfRole(player?.role ?? 'villager', state.config.sharedWolfRoles)) ? state.wolfVoteConsensus : null,
     witchCanUseBothPotions: state.config.witchCanUseBothPotions,
     pkCandidates: state.pkCandidates,
+    sheriffVoteWeight: state.config.sheriffVoteWeight,
+    preNightHint: state.phase === 'PRE_NIGHT' ? engine.getPreNightHint() : null,
+    // 当玩家自己已提交夜间行动且正在等待他人行动时，展示自己的行动信息
+    myNightAction: (() => {
+      if (state.phase !== 'NIGHT' || !player) return null;
+      const roleId = player.role;
+      if (!roleId) return null;
+
+      // 1. 查找当前子阶段对应的行动
+      //    对于共同睁眼的狼人（werewolf子阶段），查找'werewolf'键
+      const actionKey = isSharedWolfRole(roleId, state.config.sharedWolfRoles) ? 'werewolf' : roleId;
+      const action = state.nightActions[actionKey];
+      if (action && action.submitted && action.actorSeat === player.seatNumber) {
+        return action;
+      }
+
+      // 2. 回退查找玩家自身角色的行动
+      //    Bug修复：噩梦之影以噩梦身份提交恐惧后，在狼人子阶段投票时
+      //    应展示已提交的恐惧行动信息
+      if (actionKey !== roleId) {
+        const ownAction = state.nightActions[roleId];
+        if (ownAction && ownAction.submitted && ownAction.actorSeat === player.seatNumber) {
+          return ownAction;
+        }
+      }
+
+      return null;
+    })(),
   };
 }
 
@@ -230,6 +260,7 @@ function buildJudgeRoomStateDTO(state: RoomState): JudgeRoomStateDTO {
     wolfVotes: state.wolfVotes,
     wolfVoteConsensus: state.wolfVoteConsensus,
     wolfChatMessages: state.wolfChatMessages,
+    sheriffElectionVotes: state.sheriffElectionVotes,
   };
 }
 
@@ -254,7 +285,7 @@ function broadcastRoomState(roomCode: string): void {
   const clients = lobby.getRoomClients(roomCode);
 
   for (const client of clients) {
-    if (client.ws.readyState !== WebSocket.OPEN) continue;
+    if (!client.ws || client.ws.readyState !== WebSocket.OPEN) continue;
 
     let message: ServerMessage;
 
@@ -359,6 +390,10 @@ function handleMessage(ws: WebSocket, rawMessage: string): void {
       handleLeaveRoom(client);
       break;
 
+    case 'DISSOLVE_ROOM':
+      handleDissolveRoom(client);
+      break;
+
     case 'READY':
       handleReady(client, message);
       break;
@@ -377,8 +412,12 @@ function handleMessage(ws: WebSocket, rawMessage: string): void {
       handleDayVote(client, message);
       break;
 
-    case 'JUDGE_ELECTION_VOTE':
-      handleJudgeElectionVote(client, message);
+    case 'SHERIFF_ELECTION_VOTE':
+      handleSheriffElectionVote(client, message);
+      break;
+
+    case 'SHERIFF_TRANSFER':
+      handleSheriffTransfer(client, message);
       break;
 
     case 'KNIGHT_DUEL':
@@ -457,6 +496,11 @@ function handleMessage(ws: WebSocket, rawMessage: string): void {
 
     case 'ARBITRATION_VOTE':
       handleArbitrationVote(client, message);
+      break;
+
+    // ---- 重连 ----
+    case 'RECONNECT':
+      handleReconnect(client, message, ws);
       break;
 
     // ---- 管理员操作 ----
@@ -585,6 +629,39 @@ function handleLeaveRoom(client: ClientContext): void {
   }
 }
 
+function handleDissolveRoom(client: ClientContext): void {
+  const roomCode = client.roomCode;
+  if (!roomCode) {
+    safeSend(client.ws, { type: 'ERROR', code: 'NOT_IN_ROOM', message: '你不在任何房间中' });
+    return;
+  }
+
+  if (!client.isJudge) {
+    safeSend(client.ws, { type: 'ERROR', code: 'NOT_JUDGE', message: '只有法官可以解散房间' });
+    return;
+  }
+
+  // 先获取房间内所有客户端，再解散房间
+  const clients = lobby.getRoomClients(roomCode);
+  const result = lobby.dissolveRoom(client.playerId);
+
+  if (!result.success) {
+    safeSend(client.ws, { type: 'ERROR', code: 'DISSOLVE_FAILED', message: result.error ?? '解散房间失败' });
+    return;
+  }
+
+  // 向所有客户端广播房间解散消息
+  const dissolveMessage = {
+    type: 'ROOM_DISSOLVED' as const,
+    reason: '法官解散了房间',
+    players: result.players ?? [],
+  };
+
+  for (const c of clients) {
+    safeSend(c.ws, dissolveMessage);
+  }
+}
+
 function handleReady(client: ClientContext, message: ClientMessage & { type: 'READY' }): void {
   if (!client.roomCode) {
     safeSend(client.ws, { type: 'ERROR', code: 'NOT_IN_ROOM', message: '你不在任何房间中' });
@@ -691,19 +768,61 @@ function handleDayVote(client: ClientContext, message: ClientMessage & { type: '
   broadcastRoomState(client.roomCode);
 }
 
-function handleJudgeElectionVote(client: ClientContext, message: ClientMessage & { type: 'JUDGE_ELECTION_VOTE' }): void {
+function handleSheriffElectionVote(client: ClientContext, message: ClientMessage & { type: 'SHERIFF_ELECTION_VOTE' }): void {
   if (!client.roomCode) return;
 
   const engine = lobby.getRoom(client.roomCode);
   if (!engine) return;
 
-  const result = engine.submitJudgeElectionVote(client.playerId, message.targetSeat);
+  const result = engine.submitSheriffElectionVote(client.playerId, message.targetSeat);
   if (!result.success) {
-    safeSend(client.ws, { type: 'ERROR', code: 'JUDGE_ELECTION_VOTE_FAILED', message: result.error! });
+    safeSend(client.ws, { type: 'ERROR', code: 'SHERIFF_ELECTION_VOTE_FAILED', message: result.error! });
     return;
   }
 
   broadcastRoomState(client.roomCode);
+}
+
+function handleSheriffTransfer(client: ClientContext, message: ClientMessage & { type: 'SHERIFF_TRANSFER' }): void {
+  if (!client.roomCode) return;
+
+  const engine = lobby.getRoom(client.roomCode);
+  if (!engine) return;
+
+  const result = engine.submitSheriffTransfer(client.playerId, message.targetSeat);
+  if (!result.success) {
+    safeSend(client.ws, { type: 'ERROR', code: 'SHERIFF_TRANSFER_FAILED', message: result.error! });
+    return;
+  }
+
+  broadcastRoomState(client.roomCode);
+}
+
+/**
+ * 处理重连消息 — 断连后使用之前的 playerId 恢复会话
+ */
+function handleReconnect(client: ClientContext, message: ClientMessage & { type: 'RECONNECT' }, ws: WebSocket): void {
+  const { playerId, roomCode } = message;
+
+  const result = lobby.reconnectPlayer(playerId, roomCode, ws);
+  if (!result.success) {
+    safeSend(ws, { type: 'ERROR', code: 'RECONNECT_FAILED', message: result.error! });
+    return;
+  }
+
+  // 重连成功：删除新连接时创建的临时 context，恢复使用旧 context
+  if (result.newPlayerId) {
+    lobby.removeClientContext(result.newPlayerId);
+  }
+
+  const reconnectedContext = result.context!;
+
+  // 发送重连成功消息
+  const rc = reconnectedContext.roomCode!;
+  safeSend(ws, { type: 'RECONNECT_SUCCESS', playerId: reconnectedContext.playerId, roomCode: rc });
+
+  // 广播房间状态（让其他玩家看到该玩家已重连）
+  broadcastRoomState(rc);
 }
 
 function handleKnightDuel(client: ClientContext, message: ClientMessage & { type: 'KNIGHT_DUEL' }): void {
@@ -1292,7 +1411,10 @@ function handleAdminCleanupConfig(client: ClientContext, message: ClientMessage 
  * 异步执行，不阻塞主流程
  */
 async function persistLog(log: ActionLog): Promise<void> {
-  if (!isMongoConnected()) return;
+  if (!isMongoConnected()) {
+    console.warn('[MongoDB] 日志写入跳过：数据库未连接');
+    return;
+  }
 
   try {
     await GameLogModel.create({
@@ -1312,7 +1434,7 @@ async function persistLog(log: ActionLog): Promise<void> {
       nightActionOrderSnapshot: log.nightActionOrderSnapshot,
     });
   } catch (error) {
-    console.error('[MongoDB] 日志写入失败:', (error as Error).message);
+    console.error('[MongoDB] 日志写入失败:', (error as Error).message, '| actionType:', log.actionType, '| roomCode:', log.roomCode);
   }
 }
 
@@ -1417,19 +1539,37 @@ lobby.setGameEventCallback((roomCode: string, eventType: string, data: Record<st
         nickname: data.nickname as string,
       });
       break;
-    case 'JUDGE_ELECTED':
+    case 'SHERIFF_ELECTED':
       broadcastToRoom(roomCode, {
-        type: 'JUDGE_ELECTED',
+        type: 'SHERIFF_ELECTED',
         seatNumber: data.seatNumber as number,
         nickname: data.nickname as string,
         votes: data.votes as Record<number, number>,
       });
       break;
-    case 'JUDGE_ELECTION_TIE':
+    case 'SHERIFF_ELECTION_TIE':
       broadcastToRoom(roomCode, {
-        type: 'JUDGE_ELECTION_TIE',
+        type: 'SHERIFF_ELECTION_TIE',
         tieCandidates: data.tieCandidates as number[],
         votes: data.votes as Record<number, number>,
+      });
+      break;
+    case 'SHERIFF_TRANSFER_REQUEST':
+      broadcastToRoom(roomCode, {
+        type: 'SHERIFF_TRANSFER_REQUEST',
+        deadSheriffSeat: data.deadSheriffSeat as number,
+        deadSheriffNickname: data.deadSheriffNickname as string,
+        availableTargets: data.availableTargets as number[],
+        timeout: data.timeout as number,
+      });
+      break;
+    case 'SHERIFF_TRANSFER_RESULT':
+      broadcastToRoom(roomCode, {
+        type: 'SHERIFF_TRANSFER_RESULT',
+        fromSeat: data.fromSeat as number,
+        toSeat: data.toSeat as number,
+        toNickname: data.toNickname as string,
+        isTimeout: data.isTimeout as boolean,
       });
       break;
   }
@@ -1438,6 +1578,24 @@ lobby.setGameEventCallback((roomCode: string, eventType: string, data: Record<st
 // 夜间子阶段推进回调 — 广播 ROOM_STATE 确保前端感知阶段切换
 lobby.setNightSubPhaseAdvanceCallback((roomCode: string) => {
   broadcastRoomState(roomCode);
+});
+
+// 夜间倒计时广播回调 — 每秒向所有客户端推送当前夜间子阶段剩余时间
+lobby.setNightCountdownCallback((roomCode: string, roleId: import('@langrensha/shared').RoleId, remaining: number) => {
+  broadcastToRoom(roomCode, {
+    type: 'NIGHT_COUNTDOWN',
+    roleId,
+    remaining,
+  });
+});
+
+// 发言倒计时广播回调 — 每秒向所有客户端推送当前发言者剩余时间
+lobby.setSpeechCountdownCallback((roomCode: string, seatNumber: number, remaining: number) => {
+  broadcastToRoom(roomCode, {
+    type: 'SPEECH_COUNTDOWN',
+    seatNumber,
+    remaining,
+  });
 });
 
 // 天亮公告回调 — 向所有客户端广播死亡/禁言信息
@@ -1513,6 +1671,26 @@ const server = http.createServer((_req, res) => {
 });
 
 const wss = new WebSocketServer({ server });
+
+// ============================================================================
+// LOBBY 阶段掉线检查定时器
+// 每 1.5 秒检查所有 LOBBY 阶段房间中的玩家，若已断连则立即移除
+// ============================================================================
+const LOBBY_DISCONNECT_CHECK_INTERVAL = 1500; // 1.5 秒
+
+setInterval(() => {
+  const removedPlayers = lobby.checkLobbyDisconnectedPlayers();
+  for (const { roomCode, seatNumber, nickname } of removedPlayers) {
+    // 广播玩家离开消息
+    broadcastToRoom(roomCode, {
+      type: 'PLAYER_LEFT',
+      seatNumber,
+      nickname,
+    });
+    // 广播更新后的房间状态
+    broadcastRoomState(roomCode);
+  }
+}, LOBBY_DISCONNECT_CHECK_INTERVAL);
 
 wss.on('connection', (ws) => {
   console.log('[WS] 新连接');
