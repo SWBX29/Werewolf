@@ -428,6 +428,28 @@ const HomeView: React.FC = () => {
               />
             </div>
 
+            {/* 女巫同晚双药 */}
+            <div className="flex items-center justify-between">
+              <span className="text-sm">女巫同晚双药</span>
+              <input
+                type="checkbox"
+                checked={ruleConfig.witchCanUseBothPotions}
+                onChange={(e) => updateRuleConfig({ witchCanUseBothPotions: e.target.checked })}
+                className="accent-wolf-500 w-4 h-4"
+              />
+            </div>
+
+            {/* 法官选举 */}
+            <div className="flex items-center justify-between">
+              <span className="text-sm">启用法官（警长）选举</span>
+              <input
+                type="checkbox"
+                checked={ruleConfig.judgeElectionEnabled}
+                onChange={(e) => updateRuleConfig({ judgeElectionEnabled: e.target.checked })}
+                className="accent-wolf-500 w-4 h-4"
+              />
+            </div>
+
             {/* 骑士决斗狼王 */}
             <div className="flex items-center justify-between">
               <span className="text-sm">骑士决斗狼王</span>

@@ -64,6 +64,10 @@ const ACTION_TYPE_NAMES: Record<ActionType, string> = {
   MECHANICAL_WOLF_SKILL_DEFERRED: '机械狼技能延迟',
   DEAD_CHAT_MESSAGE: '死亡玩家聊天',
   DAY_VOTE_IDENTITY_REVEAL: '白天票出身份揭示',
+  JUDGE_ELECTION_START: '法官选举开始',
+  JUDGE_ELECTION_VOTE: '法官选举投票',
+  JUDGE_ELECTED: '法官当选',
+  JUDGE_ELECTION_TIE: '法官选举平票',
 };
 
 const PHASE_NAMES: Record<GamePhase, string> = {
@@ -76,6 +80,7 @@ const PHASE_NAMES: Record<GamePhase, string> = {
   DAY_SETTLEMENT: '白天结算',
   DAY_INTERRUPT: '中断',
   PK_VOTE: 'PK',
+  JUDGE_ELECTION: '法官选举',
   GAME_OVER: '结束',
 };
 

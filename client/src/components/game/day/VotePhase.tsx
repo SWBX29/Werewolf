@@ -35,7 +35,10 @@ const VotePhase: React.FC = () => {
     .map((p) => p.seatNumber);
 
   // PK阶段仅限PK候选人为投票目标
-  const effectiveTargets = isPK && voteResult?.pkCandidates?.length
+  const pkCandidatesFromState = playerState.pkCandidates ?? [];
+  const effectiveTargets = isPK && pkCandidatesFromState.length
+    ? voteTargets.filter((s) => pkCandidatesFromState.includes(s))
+    : isPK && voteResult?.pkCandidates?.length
     ? voteTargets.filter((s) => voteResult.pkCandidates.includes(s))
     : voteTargets;
 
@@ -272,9 +275,9 @@ const VotePhase: React.FC = () => {
       </div>
 
       {/* PK候选人提示 */}
-      {isPK && voteResult?.pkCandidates?.length && !voteData && (
+      {isPK && (pkCandidatesFromState.length || voteResult?.pkCandidates?.length) && !voteData && (
         <div className="p-2 bg-yellow-900/20 rounded border border-yellow-700/50 text-sm text-yellow-300">
-          PK候选人：{voteResult.pkCandidates.map((s) => `${s}号 ${getPlayerName(s)}`).join('、')}
+          PK候选人：{(pkCandidatesFromState.length ? pkCandidatesFromState : voteResult?.pkCandidates ?? []).map((s) => `${s}号 ${getPlayerName(s)}`).join('、')}
         </div>
       )}
 

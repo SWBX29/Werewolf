@@ -86,7 +86,7 @@ export const ROLE_META: Record<RoleId, RoleMeta> = {
     id: 'guard',
     name: '守卫',
     faction: 'good',
-    description: '每晚可守护一名玩家（不可连续守同一人）',
+    description: '每晚可守护一名玩家（不可重复守护同一人）',
   },
   idiot: {
     id: 'idiot',
@@ -363,6 +363,9 @@ export interface RuleConfig {
 
   /** 白天票出身份显示方式（规则20） */
   revealIdentityOnDayVote: RevealIdentityOnDayVote;
+
+  /** 是否启用法官（警长）选举 */
+  judgeElectionEnabled: boolean;
 }
 
 /**
@@ -409,6 +412,7 @@ export function createDefaultRuleConfig(playerCount: number = 9): RuleConfig {
     speechTimeout: 60,
     voteTimeout: 20,
     revealIdentityOnDayVote: 'FACTION',
+    judgeElectionEnabled: false,
   };
 }
 
@@ -432,6 +436,7 @@ export type GamePhase =
   | 'NIGHT'             // 夜间行动（含子阶段）
   | 'NIGHT_SETTLEMENT'  // 夜间结算
   | 'DAY_ANNOUNCE'      // 白天公布死讯
+  | 'JUDGE_ELECTION'    // 法官选举
   | 'DAY_SPEECH'        // 白天发言
   | 'DAY_VOTE'          // 白天投票
   | 'DAY_SETTLEMENT'    // 白天结算
@@ -559,6 +564,10 @@ export interface RoomState {
   currentSpeakerIndex: number;
   /** 投票记录：key 为投票者座位号，value 为目标座位号 */
   votes: Record<number, number>;
+  /** 法官选举投票记录：key 为投票者座位号，value 为目标座位号 */
+  judgeElectionVotes: Record<number, number>;
+  /** PK投票候选人座位号列表（仅 PK_VOTE 阶段有值） */
+  pkCandidates: number[];
   /** 夜间行动记录：key 为角色ID，value 为该角色当晚的行动数据 */
   nightActions: Record<string, NightActionData>;
   /** 当晚被狼人击杀的座位号 */
@@ -748,6 +757,8 @@ export interface PlayerRoomStateDTO {
   winner: Faction | null;
   /** 女巫同一晚能否同时使用解药和毒药 */
   witchCanUseBothPotions: boolean;
+  /** PK投票候选人座位号列表（仅 PK_VOTE 阶段有值） */
+  pkCandidates: number[];
 }
 
 /**
@@ -861,7 +872,8 @@ export type ClientMessageType =
   | 'APPEAL'
   | 'ARBITRATION_VOTE'
   | 'ADMIN_FETCH_LOGS'
-  | 'ADMIN_CLEANUP_CONFIG';
+  | 'ADMIN_CLEANUP_CONFIG'
+  | 'JUDGE_ELECTION_VOTE';
 
 /**
  * 服务端 → 客户端 消息类型枚举
@@ -879,6 +891,8 @@ export type ServerMessageType =
   | 'HUNTER_GUN_RESULT'
   | 'WOLF_KING_GUN_RESULT'
   | 'IDIOT_REVEAL'
+  | 'JUDGE_ELECTED'
+  | 'JUDGE_ELECTION_TIE'
   | 'GAME_OVER'
   | 'ERROR'
   | 'JUDGE_WARNING'
@@ -1154,6 +1168,15 @@ export interface AdminCleanupConfigMessage {
 }
 
 /**
+ * 法官选举投票 — 玩家投票选举法官（警长）
+ */
+export interface JudgeElectionVoteMessage {
+  type: 'JUDGE_ELECTION_VOTE';
+  /** 投票目标座位号，null 表示弃权 */
+  targetSeat: number | null;
+}
+
+/**
  * 客户端消息联合类型
  */
 export type ClientMessage =
@@ -1184,7 +1207,8 @@ export type ClientMessage =
   | AppealClientMessage
   | ArbitrationVoteClientMessage
   | AdminFetchLogsMessage
-  | AdminCleanupConfigMessage;
+  | AdminCleanupConfigMessage
+  | JudgeElectionVoteMessage;
 
 // ---- 服务端消息定义 ----
 
@@ -1298,6 +1322,21 @@ export interface IdiotRevealMessage {
   type: 'IDIOT_REVEAL';
   seatNumber: number;
   nickname: string;
+}
+
+/** 法官选举结果 */
+export interface JudgeElectedMessage {
+  type: 'JUDGE_ELECTED';
+  seatNumber: number;
+  nickname: string;
+  votes: Record<number, number>;
+}
+
+/** 法官选举平票 */
+export interface JudgeElectionTieMessage {
+  type: 'JUDGE_ELECTION_TIE';
+  tieCandidates: number[];
+  votes: Record<number, number>;
 }
 
 export interface GameOverMessage {
@@ -1477,6 +1516,8 @@ export type ServerMessage =
   | HunterGunResultMessage
   | WolfKingGunResultMessage
   | IdiotRevealMessage
+  | JudgeElectedMessage
+  | JudgeElectionTieMessage
   | GameOverMessage
   | ErrorMessage
   | JudgeWarningMessage
@@ -1533,6 +1574,11 @@ export type ActionType =
   | 'HUNTER_GUN'
   | 'WOLF_KING_GUN'
   | 'IDIOT_REVEAL'
+  // 法官选举
+  | 'JUDGE_ELECTION_START'
+  | 'JUDGE_ELECTION_VOTE'
+  | 'JUDGE_ELECTED'
+  | 'JUDGE_ELECTION_TIE'
   // 法官操作
   | 'JUDGE_OVERRIDE_SETTLEMENT'
   | 'JUDGE_FORCE_NEXT_PHASE'

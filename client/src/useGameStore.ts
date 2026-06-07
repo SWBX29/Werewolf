@@ -148,6 +148,7 @@ interface GameState {
   // ---- 游戏操作 ----
   submitNightAction: (roleId: RoleId, targetSeat: number | null, extra: NightActionExtra) => void;
   submitVote: (targetSeat: number | null) => void;
+  submitJudgeElectionVote: (targetSeat: number | null) => void;
   knightDuel: (targetSeat: number) => void;
   whiteWolfExplode: (targetSeat: number) => void;
   hunterGun: (targetSeat: number) => void;
@@ -413,6 +414,13 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
+  submitJudgeElectionVote: (targetSeat: number | null) => {
+    get().sendMessage({
+      type: 'JUDGE_ELECTION_VOTE',
+      targetSeat,
+    });
+  },
+
   knightDuel: (targetSeat: number) => {
     get().sendMessage({
       type: 'KNIGHT_DUEL',
@@ -669,6 +677,7 @@ function handleServerMessage(
         DAY_SETTLEMENT: '白天结算中',
         DAY_INTERRUPT: '白天中断',
         PK_VOTE: 'PK投票',
+        JUDGE_ELECTION: '法官选举',
         GAME_OVER: '游戏结束',
       };
       set({ phaseAnnouncement: phaseNames[message.phase] || message.phase });
@@ -903,6 +912,16 @@ function handleServerMessage(
 
     case 'IDIOT_REVEAL': {
       set({ phaseAnnouncement: `${message.seatNumber}号 ${message.nickname} 翻牌白痴，免死！` });
+      break;
+    }
+
+    case 'JUDGE_ELECTED': {
+      set({ phaseAnnouncement: `👑 ${message.seatNumber}号 ${message.nickname} 当选法官！` });
+      break;
+    }
+
+    case 'JUDGE_ELECTION_TIE': {
+      set({ phaseAnnouncement: `法官选举平票，无人当选` });
       break;
     }
   }
