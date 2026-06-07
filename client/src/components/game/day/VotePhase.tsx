@@ -10,6 +10,7 @@ const VotePhase: React.FC = () => {
   const voteResult = useGameStore((s) => s.voteResult);
   const isActionLocked = useGameStore((s) => s.isActionLocked);
   const submitVote = useGameStore((s) => s.submitVote);
+  const setActionLocked = useGameStore((s) => s.setActionLocked);
   const whiteWolfExplode = useGameStore((s) => s.whiteWolfExplode);
   const ruleConfig = useGameStore((s) => s.ruleConfig);
   const dayAnnouncement = useGameStore((s) => s.dayAnnouncement);
@@ -72,6 +73,7 @@ const VotePhase: React.FC = () => {
 
   const confirmVote = () => {
     submitVote(confirmTarget);
+    setActionLocked(true);
     setShowConfirm(false);
   };
 

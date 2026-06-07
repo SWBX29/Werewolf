@@ -8,6 +8,7 @@ const SpeechPhase: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
   const speechMessages = useGameStore((s) => s.speechMessages);
   const sendSpeech = useGameStore((s) => s.sendSpeech);
+  const finishSpeech = useGameStore((s) => s.finishSpeech);
   const ruleConfig = useGameStore((s) => s.ruleConfig);
   const whiteWolfExplode = useGameStore((s) => s.whiteWolfExplode);
   const isActionLocked = useGameStore((s) => s.isActionLocked);
@@ -424,6 +425,13 @@ const SpeechPhase: React.FC = () => {
               发送
             </button>
           </div>
+          <button
+            className="w-full py-2 px-4 rounded-lg bg-amber-800 hover:bg-amber-700 text-white font-semibold
+                       border border-amber-600 transition-colors duration-200 text-sm"
+            onClick={finishSpeech}
+          >
+            结束发言
+          </button>
         </div>
       )}
 

@@ -9,6 +9,7 @@ const SheriffElection: React.FC = () => {
   const isActionLocked = useGameStore((s) => s.isActionLocked);
   const ruleConfig = useGameStore((s) => s.ruleConfig);
   const submitSheriffElectionVote = useGameStore((s) => s.submitSheriffElectionVote);
+  const setActionLocked = useGameStore((s) => s.setActionLocked);
   const phaseAnnouncement = useGameStore((s) => s.phaseAnnouncement);
 
   const [selectedSeat, setSelectedSeat] = useState<number | null>(null);
@@ -53,6 +54,7 @@ const SheriffElection: React.FC = () => {
   // 确认投票
   const confirmVote = () => {
     submitSheriffElectionVote(confirmTarget);
+    setActionLocked(true);
     setShowConfirm(false);
   };
 

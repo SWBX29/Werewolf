@@ -440,6 +440,10 @@ function handleMessage(ws: WebSocket, rawMessage: string): void {
       handleSpeech(client, message);
       break;
 
+    case 'FINISH_SPEECH':
+      handleFinishSpeech(client);
+      break;
+
     // ---- 法官操作 ----
     case 'UPDATE_NIGHT_ORDER':
       handleUpdateNightOrder(client, message);
@@ -945,6 +949,21 @@ function handleSpeech(client: ClientContext, message: ClientMessage & { type: 'S
     nickname: player.nickname,
     content: message.content,
   });
+}
+
+function handleFinishSpeech(client: ClientContext): void {
+  if (!client.roomCode) return;
+
+  const engine = lobby.getRoom(client.roomCode);
+  if (!engine) return;
+
+  const result = engine.finishSpeech(client.playerId);
+  if (!result.success) {
+    safeSend(client.ws, { type: 'ERROR', code: 'FINISH_SPEECH_FAILED', message: result.error! });
+    return;
+  }
+
+  broadcastRoomState(client.roomCode);
 }
 
 function handleAppeal(client: ClientContext, message: ClientMessage & { type: 'APPEAL' }): void {

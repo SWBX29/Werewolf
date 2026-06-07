@@ -836,6 +836,11 @@ export interface NightActionRequestDTO {
   /** 附加提示信息 */
   hint: string;
   /**
+   * 是否因被噩梦之影恐惧而封印
+   * 为 true 时客户端应显示被恐惧提示，禁止操作，等待倒计时结束
+   */
+  isBlockedByNightmare: boolean;
+  /**
    * 女巫专属：今晚被杀者座位号（如果女巫在守卫之后行动且能看到死讯）
    * 如果女巫在守卫之前行动，此值为 null（盲救）
    */
@@ -889,6 +894,7 @@ export type ClientMessageType =
   | 'HUNTER_GUN'
   | 'WOLF_KING_GUN'
   | 'SPEECH'
+  | 'FINISH_SPEECH'
   | 'UPDATE_NIGHT_ORDER'
   | 'JUDGE_OVERRIDE_SETTLEMENT'
   | 'JUDGE_FORCE_NEXT_PHASE'
@@ -1066,6 +1072,13 @@ export interface WolfKingGunMessage {
 export interface SpeechMessage {
   type: 'SPEECH';
   content: string;
+}
+
+/**
+ * 结束发言 — 当前发言者主动结束自己的发言回合
+ */
+export interface FinishSpeechMessage {
+  type: 'FINISH_SPEECH';
 }
 
 /**
@@ -1264,6 +1277,7 @@ export type ClientMessage =
   | HunterGunMessage
   | WolfKingGunMessage
   | SpeechMessage
+  | FinishSpeechMessage
   | UpdateNightOrderMessage
   | JudgeOverrideSettlementMessage
   | JudgeForceNextPhaseMessage
@@ -1718,6 +1732,7 @@ export type ActionType =
   | 'SPEECH_START'
   | 'SPEECH_CONTENT'
   | 'SPEECH_SKIP'
+  | 'SPEECH_FINISH'
   | 'VOTE_CAST'
   | 'VOTE_RESULT'
   | 'PK_VOTE_START'
