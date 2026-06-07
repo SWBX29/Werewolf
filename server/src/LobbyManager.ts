@@ -267,7 +267,6 @@ export class LobbyManager {
       wolfVotes: {},
       wolfVoteConsensus: false,
       wolfChatMessages: [],
-      pkCandidates: [],
       nightDeaths: [],
       dayDeaths: [],
       isPaused: false,

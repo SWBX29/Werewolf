@@ -175,23 +175,6 @@ function stripPlayerToDTO(player: Player, forPlayerId: string | null, engine?: G
  *   - 狼人击杀目标/女巫毒药目标等不包含
  *   - 投票详情仅在投票阶段结束后可见
  */
-function isWolfPhaseViewer(player: Player | undefined, sharedWolfRoles: string[], engine: GameEngine): boolean {
-  if (!player || player.status !== 'alive') return false;
-  if (isSharedWolfRole(player.role, sharedWolfRoles)) return true;
-  // 机械狼在可行动时也可查看狼人数据
-  if (player.role === 'mechanical_wolf') {
-    const state = engine.getState();
-    const alivePlayers = state.players.filter((p) => !p.isJudge && p.status === 'alive');
-    const hiddenWolf = alivePlayers.find((p) => p.role === 'hidden_wolf');
-    if (hiddenWolf) return false;
-    const hasSharedWolfAlive = alivePlayers.some(
-      (p) => isSharedWolfRole(p.role, sharedWolfRoles) && p.role !== 'mechanical_wolf'
-    );
-    return !hasSharedWolfAlive;
-  }
-  return false;
-}
-
 function buildPlayerRoomStateDTO(state: RoomState, forPlayerId: string, engine: GameEngine): PlayerRoomStateDTO {
   const player = state.players.find((p) => p.id === forPlayerId);
 
@@ -210,10 +193,9 @@ function buildPlayerRoomStateDTO(state: RoomState, forPlayerId: string, engine: 
     currentNightRole: state.phase === 'NIGHT' ? (state.nightSubPhase?.currentRole ?? null) : null,
     isPaused: state.isPaused,
     winner: state.winner,
-    wolfChatMessages: isWolfPhaseViewer(player, state.config.sharedWolfRoles, engine) ? state.wolfChatMessages : [],
-    wolfVotes: (state.phase === 'NIGHT' && state.nightSubPhase?.currentRole === 'werewolf' && isWolfPhaseViewer(player, state.config.sharedWolfRoles, engine)) ? state.wolfVotes : null,
-    wolfVoteConsensus: (state.phase === 'NIGHT' && state.nightSubPhase?.currentRole === 'werewolf' && isWolfPhaseViewer(player, state.config.sharedWolfRoles, engine)) ? state.wolfVoteConsensus : null,
-    pkCandidates: state.phase === 'PK_VOTE' ? state.pkCandidates : [],
+    wolfChatMessages: isSharedWolfRole(player?.role ?? 'villager', state.config.sharedWolfRoles) ? state.wolfChatMessages : [],
+    wolfVotes: (state.phase === 'NIGHT' && state.nightSubPhase?.currentRole === 'werewolf' && isSharedWolfRole(player?.role ?? 'villager', state.config.sharedWolfRoles)) ? state.wolfVotes : null,
+    wolfVoteConsensus: (state.phase === 'NIGHT' && state.nightSubPhase?.currentRole === 'werewolf' && isSharedWolfRole(player?.role ?? 'villager', state.config.sharedWolfRoles)) ? state.wolfVoteConsensus : null,
     witchCanUseBothPotions: state.config.witchCanUseBothPotions,
   };
 }
@@ -449,10 +431,6 @@ function handleMessage(ws: WebSocket, rawMessage: string): void {
 
     case 'JUDGE_SKIP_SPEECH':
       handleJudgeSkipSpeech(client, message);
-      break;
-
-    case 'JUDGE_NEXT_SPEAKER':
-      handleJudgeNextSpeaker(client);
       break;
 
     // ---- 狼人聊天与投票 ----
@@ -1057,20 +1035,6 @@ function handleJudgeSkipSpeech(client: ClientContext, message: ClientMessage & {
   const result = engine.skipPlayerSpeech(client.playerId, message.seatNumber);
   if (!result.success) {
     safeSend(client.ws, { type: 'ERROR', code: 'SKIP_FAILED', message: result.error! });
-    return;
-  }
-
-  broadcastRoomState(client.roomCode);
-}
-
-function handleJudgeNextSpeaker(client: ClientContext): void {
-  if (!client.roomCode || !client.isJudge) return;
-  const engine = lobby.getRoom(client.roomCode);
-  if (!engine) return;
-
-  const result = engine.nextSpeaker();
-  if (!result.success) {
-    safeSend(client.ws, { type: 'ERROR', code: 'NEXT_SPEAKER_FAILED', message: result.error! });
     return;
   }
 
