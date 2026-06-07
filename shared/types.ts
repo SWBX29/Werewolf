@@ -364,8 +364,11 @@ export interface RuleConfig {
   /** 白天票出身份显示方式（规则20） */
   revealIdentityOnDayVote: RevealIdentityOnDayVote;
 
-  /** 是否启用法官（警长）选举 */
-  judgeElectionEnabled: boolean;
+  /** 是否启用警长选举 */
+  sheriffElectionEnabled: boolean;
+
+  /** 警长投票权重（1 / 1.5 / 2），默认 1.5 */
+  sheriffVoteWeight: 1 | 1.5 | 2;
 }
 
 /**
@@ -412,7 +415,8 @@ export function createDefaultRuleConfig(playerCount: number = 9): RuleConfig {
     speechTimeout: 60,
     voteTimeout: 20,
     revealIdentityOnDayVote: 'FACTION',
-    judgeElectionEnabled: false,
+    sheriffElectionEnabled: false,
+    sheriffVoteWeight: 1.5,
   };
 }
 
@@ -436,7 +440,7 @@ export type GamePhase =
   | 'NIGHT'             // 夜间行动（含子阶段）
   | 'NIGHT_SETTLEMENT'  // 夜间结算
   | 'DAY_ANNOUNCE'      // 白天公布死讯
-  | 'JUDGE_ELECTION'    // 法官选举
+  | 'SHERIFF_ELECTION'   // 警长选举
   | 'DAY_SPEECH'        // 白天发言
   | 'DAY_VOTE'          // 白天投票
   | 'DAY_SETTLEMENT'    // 白天结算
@@ -483,8 +487,10 @@ export interface Player {
   role: RoleId;
   /** 存活状态 */
   status: PlayerStatus;
-  /** 是否为法官 */
+  /** 是否为法官（上帝/房主） */
   isJudge: boolean;
+  /** 是否为警长（选举产生的玩家角色） */
+  isSheriff: boolean;
   /** 是否为房主 */
   isHost: boolean;
   /** 是否已准备 */
@@ -564,8 +570,8 @@ export interface RoomState {
   currentSpeakerIndex: number;
   /** 投票记录：key 为投票者座位号，value 为目标座位号 */
   votes: Record<number, number>;
-  /** 法官选举投票记录：key 为投票者座位号，value 为目标座位号 */
-  judgeElectionVotes: Record<number, number>;
+  /** 警长选举投票记录：key 为投票者座位号，value 为目标座位号 */
+  sheriffElectionVotes: Record<number, number>;
   /** PK投票候选人座位号列表（仅 PK_VOTE 阶段有值） */
   pkCandidates: number[];
   /** 夜间行动记录：key 为角色ID，value 为该角色当晚的行动数据 */
@@ -693,6 +699,7 @@ export interface PlayerDTO {
   seatNumber: number;
   status: PlayerStatus;
   isJudge: boolean;
+  isSheriff: boolean;
   isHost: boolean;
   isReady: boolean;
   isMuted: boolean;
@@ -759,6 +766,8 @@ export interface PlayerRoomStateDTO {
   witchCanUseBothPotions: boolean;
   /** PK投票候选人座位号列表（仅 PK_VOTE 阶段有值） */
   pkCandidates: number[];
+  /** 警长投票权重 */
+  sheriffVoteWeight: 1 | 1.5 | 2;
 }
 
 /**
@@ -1168,10 +1177,10 @@ export interface AdminCleanupConfigMessage {
 }
 
 /**
- * 法官选举投票 — 玩家投票选举法官（警长）
+ * 警长选举投票 — 玩家投票选举警长
  */
-export interface JudgeElectionVoteMessage {
-  type: 'JUDGE_ELECTION_VOTE';
+export interface SheriffElectionVoteMessage {
+  type: 'SHERIFF_ELECTION_VOTE';
   /** 投票目标座位号，null 表示弃权 */
   targetSeat: number | null;
 }
@@ -1208,7 +1217,7 @@ export type ClientMessage =
   | ArbitrationVoteClientMessage
   | AdminFetchLogsMessage
   | AdminCleanupConfigMessage
-  | JudgeElectionVoteMessage;
+  | SheriffElectionVoteMessage;
 
 // ---- 服务端消息定义 ----
 
@@ -1324,17 +1333,17 @@ export interface IdiotRevealMessage {
   nickname: string;
 }
 
-/** 法官选举结果 */
-export interface JudgeElectedMessage {
-  type: 'JUDGE_ELECTED';
+/** 警长选举结果 */
+export interface SheriffElectedMessage {
+  type: 'SHERIFF_ELECTED';
   seatNumber: number;
   nickname: string;
   votes: Record<number, number>;
 }
 
-/** 法官选举平票 */
-export interface JudgeElectionTieMessage {
-  type: 'JUDGE_ELECTION_TIE';
+/** 警长选举平票 */
+export interface SheriffElectionTieMessage {
+  type: 'SHERIFF_ELECTION_TIE';
   tieCandidates: number[];
   votes: Record<number, number>;
 }
