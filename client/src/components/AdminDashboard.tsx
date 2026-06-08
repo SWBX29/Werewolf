@@ -35,6 +35,7 @@ const ACTION_TYPE_NAMES: Record<ActionType, string> = {
   SPEECH_START: '发言开始',
   SPEECH_CONTENT: '发言内容',
   SPEECH_SKIP: '跳过发言',
+  SPEECH_FINISH: '主动结束发言',
   VOTE_CAST: '投票',
   VOTE_RESULT: '投票结果',
   PK_VOTE_START: 'PK投票',

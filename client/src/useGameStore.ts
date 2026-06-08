@@ -191,6 +191,7 @@ interface GameState {
   hunterGun: (targetSeat: number) => void;
   wolfKingGun: (targetSeat: number) => void;
   sendSpeech: (content: string) => void;
+  finishSpeech: () => void;
   sendWolfChat: (content: string) => void;
   sendWolfVote: (targetSeat: number) => void;
   sendDeadChat: (content: string) => void;
@@ -613,6 +614,10 @@ export const useGameStore = create<GameState>((set, get) => ({
     get().sendMessage({ type: 'SPEECH', content });
   },
 
+  finishSpeech: () => {
+    get().sendMessage({ type: 'FINISH_SPEECH' });
+  },
+
   sendWolfChat: (content: string) => {
     get().sendMessage({ type: 'WOLF_CHAT', content });
   },
@@ -1028,7 +1033,7 @@ function handleServerMessage(
         });
       } else {
         // 操作被服务器拒绝时，解锁操作锁定，防止界面卡死
-        if (message.code === 'NIGHT_ACTION_FAILED') {
+        if (message.code === 'NIGHT_ACTION_FAILED' || message.code === 'VOTE_FAILED' || message.code === 'SHERIFF_ELECTION_VOTE_FAILED' || message.code === 'FINISH_SPEECH_FAILED') {
           set({ error: message.message, isActionLocked: false });
         } else {
           set({ error: message.message });

@@ -451,7 +451,15 @@ export class GameEngine {
       if (roleId === 'hidden_wolf') continue;
 
       // 检查本局是否有该角色且存活
-      const hasRole = alivePlayers.some((p) => p.role === roleId);
+      // werewolf 子阶段代表所有共同睁眼狼人的集体行动阶段，
+      // 只要有任意共享狼人角色存活就应进入（不能仅检查 role === 'werewolf'）
+      let hasRole: boolean;
+      if (roleId === 'werewolf') {
+        const sharedRoles = this.state.config.sharedWolfRoles;
+        hasRole = alivePlayers.some((p) => isSharedWolfRole(p.role, sharedRoles));
+      } else {
+        hasRole = alivePlayers.some((p) => p.role === roleId);
+      }
       if (!hasRole) continue;
 
       // 检查该角色是否有夜间行动
@@ -477,7 +485,8 @@ export class GameEngine {
         isBlockedByNightmare: isBlocked,
       };
 
-      // 如果被封印，自动跳过并记录
+      // 如果被封印：不跳过阶段，而是设置标准倒计时广播 + 随机延时自动提交空操作
+      // 所有玩家看到标准倒计时（如30秒），但被恐惧玩家的操作在 5-15 秒后被自动提交（不行动）
       if (isBlocked) {
         const blockedPlayer = roleId === 'werewolf'
           ? alivePlayers.filter((p) => isSharedWolfRole(p.role, this.state.config.sharedWolfRoles))[0]
@@ -495,7 +504,7 @@ export class GameEngine {
           },
         });
 
-        // 记录封印的夜间行动
+        // 记录封印的夜间行动（空操作）
         this.state.nightActions[roleId] = {
           roleId,
           actorSeat: blockedPlayer.seatNumber,
@@ -505,12 +514,47 @@ export class GameEngine {
           blockedByNightmare: true,
         };
 
-        // 继续推进到下一个子阶段
-        return this.advanceNightSubPhase(i + 1);
+        // 设置标准倒计时定时器 + 倒计时广播（全体玩家可见，保持与正常阶段一致）
+        if (this.state.config.nightActionTimeout > 0) {
+          this.setNightActionTimer(roleId, this.state.config.nightActionTimeout);
+        }
+
+        // 随机 5-15 秒后自动提交空操作并推进到下一个子阶段
+        // 模拟真实玩家的操作时间，避免被恐惧阶段秒过暴露信息
+        const autoAdvanceDelay = Math.floor(Math.random() * 11) + 5;
+        this.setTimer('blocked_auto_advance', autoAdvanceDelay, () => {
+          // 防护：如果当前已不在夜间或子阶段已变化，忽略
+          if (this.state.phase !== 'NIGHT') return;
+          if (this.state.nightSubPhase?.currentRole !== roleId) return;
+          if (!this.state.nightSubPhase?.isBlockedByNightmare) return;
+
+          // 清除标准倒计时定时器和倒计时广播
+          this.clearTimer(`night_${roleId}`);
+          this.clearNightCountdownTimer(roleId);
+
+          // 推进到下一个子阶段
+          const nextIndex = this.state.nightSubPhase!.currentRoleIndex + 1;
+          this.advanceNightSubPhase(nextIndex);
+        });
+
+        // 发送阶段提醒
+        const actorSeats = this.getActorSeatsForSubPhase(roleId);
+        this.onPhaseReminder(
+          this.state.roomCode,
+          roleId,
+          this.state.round,
+          actorSeats,
+          this.state.config.nightActionTimeout,
+        );
+
+        // 广播房间状态，确保前端感知子阶段切换
+        this.onNightSubPhaseAdvance(this.state.roomCode);
+
+        return true;
       }
 
-      // 规则10：守卫无合法目标时自动跳过
-      if (roleId === 'guard') {
+      // 规则10：守卫无合法目标时自动跳过（被恐惧时已在上方处理，不重复检查）
+      if (!isBlocked && roleId === 'guard') {
         const guardPlayer = alivePlayers.find((p) => p.role === 'guard');
         if (guardPlayer) {
           const { disabledTargets } = this.getDisabledTargets(guardPlayer.id);
@@ -534,17 +578,17 @@ export class GameEngine {
         }
       }
 
-      // ---- 狼人子阶段特殊处理 ----
+      // ---- 狼人子阶段特殊处理（被恐惧时跳过，已在上方处理） ----
       // 当遇到 'werewolf' 时，这是所有共同睁眼狼人的集体行动阶段
-      if (roleId === 'werewolf') {
+      if (!isBlocked && roleId === 'werewolf') {
         if (this.enterWolfSubPhase()) {
           // 所有狼人被恐惧，阶段已在 enterWolfSubPhase 内推进，直接返回
           return true;
         }
       }
 
-      // ---- 机械狼子阶段特殊处理 ----
-      if (roleId === 'mechanical_wolf') {
+      // ---- 机械狼子阶段特殊处理（被恐惧时跳过，已在上方处理） ----
+      if (!isBlocked && roleId === 'mechanical_wolf') {
         const mwPlayer = alivePlayers.find((p) => p.role === 'mechanical_wolf');
         if (mwPlayer) {
           // 第一晚初始化为 selecting
@@ -1419,25 +1463,23 @@ export class GameEngine {
     // 检查夜间是否有警长死亡
     const deadSheriffSeat = this.findDeadSheriffInNightDeaths();
 
-    // SYSTEM 模式：5秒后自动过渡到下一阶段（警徽移交/警长选举或发言阶段）
-    if (this.state.gameMode === 'SYSTEM') {
-      this.setTimer('day_announce', 5, () => {
-        if (deadSheriffSeat !== null) {
-          // 警长夜间死亡，先进入警徽移交
-          this.enterSheriffTransfer(deadSheriffSeat, () => {
-            if (this.state.round === 1 && this.state.config.sheriffElectionEnabled) {
-              this.enterSheriffElection();
-            } else {
-              this.enterDaySpeech();
-            }
-          });
-        } else if (this.state.round === 1 && this.state.config.sheriffElectionEnabled) {
-          this.enterSheriffElection();
-        } else {
-          this.enterDaySpeech();
-        }
-      });
-    }
+    // 5秒后自动过渡到下一阶段（警徽移交/警长选举或发言阶段）
+    this.setTimer('day_announce', 5, () => {
+      if (deadSheriffSeat !== null) {
+        // 警长夜间死亡，先进入警徽移交
+        this.enterSheriffTransfer(deadSheriffSeat, () => {
+          if (this.state.round === 1 && this.state.config.sheriffElectionEnabled) {
+            this.enterSheriffElection();
+          } else {
+            this.enterDaySpeech();
+          }
+        });
+      } else if (this.state.round === 1 && this.state.config.sheriffElectionEnabled) {
+        this.enterSheriffElection();
+      } else {
+        this.enterDaySpeech();
+      }
+    });
   }
 
   /**
@@ -1468,8 +1510,8 @@ export class GameEngine {
 
     this.onPhaseChange('DAY_SPEECH', null, this.state.round);
 
-    // SYSTEM 模式：设置发言超时
-    if (this.state.gameMode === 'SYSTEM' && this.state.config.speechTimeout > 0) {
+    // 设置发言超时
+    if (this.state.config.speechTimeout > 0) {
       this.setSpeechTimer();
     }
   }
@@ -1500,8 +1542,8 @@ export class GameEngine {
 
     this.onPhaseChange('SHERIFF_ELECTION', null, this.state.round);
 
-    // SYSTEM 模式：设置选举超时
-    if (this.state.gameMode === 'SYSTEM' && this.state.config.voteTimeout > 0) {
+    // 设置选举超时
+    if (this.state.config.voteTimeout > 0) {
       this.setTimer('sheriff_election', this.state.config.voteTimeout, () => {
         this.resolveSheriffElection();
       });
@@ -1704,8 +1746,8 @@ export class GameEngine {
     // 保存回调，移交完成后执行
     this._afterSheriffTransfer = afterTransfer;
 
-    // SYSTEM 模式：设置移交超时
-    if (this.state.gameMode === 'SYSTEM' && this.state.config.voteTimeout > 0) {
+    // 设置移交超时
+    if (this.state.config.voteTimeout > 0) {
       this.setTimer('sheriff_transfer', this.state.config.voteTimeout, () => {
         this.resolveSheriffTransferTimeout(deadSheriffSeat);
       });
@@ -1888,8 +1930,8 @@ export class GameEngine {
       return { success: true, finished: true };
     }
 
-    // SYSTEM 模式：设置下一位发言者的超时
-    if (this.state.gameMode === 'SYSTEM' && this.state.config.speechTimeout > 0) {
+    // 设置下一位发言者的超时
+    if (this.state.config.speechTimeout > 0) {
       this.setSpeechTimer();
     }
 
@@ -1905,8 +1947,8 @@ export class GameEngine {
 
     this.onPhaseChange('DAY_VOTE', null, this.state.round);
 
-    // SYSTEM 模式：设置投票超时
-    if (this.state.gameMode === 'SYSTEM' && this.state.config.voteTimeout > 0) {
+    // 设置投票超时
+    if (this.state.config.voteTimeout > 0) {
       this.setTimer('vote', this.state.config.voteTimeout, () => {
         this.resolveDayVote();
       });
@@ -2056,8 +2098,8 @@ export class GameEngine {
       });
       this.onPhaseChange('PK_VOTE', null, this.state.round);
 
-      // SYSTEM 模式：设置PK投票超时
-      if (this.state.gameMode === 'SYSTEM' && this.state.config.voteTimeout > 0) {
+      // 设置PK投票超时
+      if (this.state.config.voteTimeout > 0) {
         this.setTimer('pk_vote', this.state.config.voteTimeout, () => {
           this.resolvePKVote();
         });
@@ -2429,7 +2471,7 @@ export class GameEngine {
       this.onPhaseChange(interruptedPhase, null, this.state.round);
 
       // 恢复发言阶段的定时器
-      if (interruptedPhase === 'DAY_SPEECH' && this.state.gameMode === 'SYSTEM' && this.state.config.speechTimeout > 0) {
+      if (interruptedPhase === 'DAY_SPEECH' && this.state.config.speechTimeout > 0) {
         this.setSpeechTimer();
       }
     }
@@ -2945,7 +2987,8 @@ export class GameEngine {
         }
         break;
       case 'DAY_SPEECH':
-        this.enterDayVote();
+        // 发言阶段：强制推进到下一位发言者，而非直接跳到投票
+        this.nextSpeaker();
         break;
       case 'DAY_VOTE':
         this.resolveDayVote();
@@ -3156,6 +3199,39 @@ export class GameEngine {
     return this.nextSpeaker();
   }
 
+  /**
+   * 当前发言者主动结束发言
+   */
+  finishSpeech(
+    playerId: string,
+  ): { success: boolean; error?: string } {
+    if (this.state.phase !== 'DAY_SPEECH') {
+      return { success: false, error: '当前不在发言阶段' };
+    }
+
+    const player = this.getPlayerById(playerId);
+    if (!player) {
+      return { success: false, error: '玩家不存在' };
+    }
+
+    const currentSpeakerSeat = this.state.speechOrder[this.state.currentSpeakerIndex] ?? null;
+    if (currentSpeakerSeat === null || player.seatNumber !== currentSpeakerSeat) {
+      return { success: false, error: '当前不是你的发言回合' };
+    }
+
+    this.logAction({
+      actorSeat: player.seatNumber,
+      actorNickname: player.nickname,
+      actionType: 'SPEECH_FINISH',
+      targetSeat: null,
+      targetNickname: null,
+      detail: {},
+    });
+
+    this.nextSpeaker();
+    return { success: true };
+  }
+
   // ==========================================================================
   // 第八部分：胜负判定
   // ==========================================================================
@@ -3323,6 +3399,9 @@ export class GameEngine {
       // 防护：如果当前已不在夜间阶段（可能已被共识/其他路径推进），忽略孤儿定时器
       if (this.state.phase !== 'NIGHT') return;
 
+      // 防护：如果当前子阶段已不匹配此定时器（可能已被共识/其他路径推进），忽略孤儿定时器
+      if (this.state.nightSubPhase?.currentRole !== roleId) return;
+
       // 超时处理：根据角色不同采取不同策略
       this.logAction({
         actorSeat: 0,
@@ -3335,6 +3414,13 @@ export class GameEngine {
 
       // 清除倒计时广播定时器
       this.clearNightCountdownTimer(roleId);
+
+      // 被恐惧封印的阶段：不执行任何行动，直接推进到下一个子阶段
+      if (this.state.nightSubPhase?.isBlockedByNightmare) {
+        const nextIndex = this.state.nightSubPhase.currentRoleIndex + 1;
+        this.advanceNightSubPhase(nextIndex);
+        return;
+      }
 
       // 夜间行动超时始终自动推进（无论游戏模式）
       // 超时策略：狼人以多数票/最小号/随机选人，预言家/守卫/机械狼/噩梦随机选人，女巫不释放技能
@@ -3500,6 +3586,13 @@ export class GameEngine {
    * 女巫超时处理：放弃操作
    */
   private handleWitchTimeout(): void {
+    // 防护：如果当前不在女巫子阶段，忽略
+    if (this.state.phase !== 'NIGHT' ||
+        !this.state.nightSubPhase ||
+        this.state.nightSubPhase.currentRole !== 'witch') {
+      return;
+    }
+
     this.logAction({
       actorSeat: 0,
       actorNickname: '系统',
@@ -3529,6 +3622,13 @@ export class GameEngine {
    * 需排除守护历史中已守护过的玩家（不可重复守护同一人）
    */
   private handleGuardTimeout(): void {
+    // 防护：如果当前不在守卫子阶段，忽略
+    if (this.state.phase !== 'NIGHT' ||
+        !this.state.nightSubPhase ||
+        this.state.nightSubPhase.currentRole !== 'guard') {
+      return;
+    }
+
     const guard = this.state.players.find((p) => p.role === 'guard' && p.status === 'alive');
     if (!guard) {
       if (this.state.nightSubPhase) {
@@ -3602,6 +3702,13 @@ export class GameEngine {
    * 噩梦之影超时处理：系统随机选择除自身外的一名存活好人玩家进行恐惧
    */
   private handleNightmareTimeout(): void {
+    // 防护：如果当前不在噩梦之影子阶段，忽略
+    if (this.state.phase !== 'NIGHT' ||
+        !this.state.nightSubPhase ||
+        this.state.nightSubPhase.currentRole !== 'nightmare_shadow') {
+      return;
+    }
+
     const nightmare = this.state.players.find((p) => p.role === 'nightmare_shadow' && p.status === 'alive');
     const aliveGoodPlayers = this.state.players.filter(
       (p) => !p.isJudge && p.status === 'alive' && !isEvilRole(p.role) &&
@@ -3651,6 +3758,13 @@ export class GameEngine {
    * 预言家超时处理：系统随机选择除自身外的一名存活玩家进行查验
    */
   private handleSeerTimeout(): void {
+    // 防护：如果当前不在预言家子阶段，忽略
+    if (this.state.phase !== 'NIGHT' ||
+        !this.state.nightSubPhase ||
+        this.state.nightSubPhase.currentRole !== 'seer') {
+      return;
+    }
+
     const seer = this.state.players.find((p) => p.role === 'seer' && p.status === 'alive');
     if (!seer) {
       if (this.state.nightSubPhase) {
@@ -3705,6 +3819,13 @@ export class GameEngine {
    * - active 阶段：随机选择技能目标 → 进入 silent 阶段
    */
   private handleMechanicalWolfTimeout(): void {
+    // 防护：如果当前不在机械狼子阶段，忽略
+    if (this.state.phase !== 'NIGHT' ||
+        !this.state.nightSubPhase ||
+        this.state.nightSubPhase.currentRole !== 'mechanical_wolf') {
+      return;
+    }
+
     const mwPlayer = this.state.players.find(
       (p) => p.role === 'mechanical_wolf' && p.status === 'alive',
     );
@@ -4230,8 +4351,23 @@ export class GameEngine {
 
     if (!isActor) return null;
 
-    // 被恐惧的狼人无法参与狼人投票，不发送行动请求
-    if (isWolfPhase && player.isNightmared) return null;
+    // 被恐惧的玩家：返回带封印标记的行动请求，让客户端显示"技能被封印"提示
+    if (sub.isBlockedByNightmare && player.isNightmared) {
+      return {
+        roleId,
+        availableTargets: [],
+        timeout: this.state.config.nightActionTimeout,
+        hint: '你被噩梦之影恐惧，技能已被封印',
+        isBlockedByNightmare: true,
+        werewolfKillTarget: null,
+        guardProtectTarget: null,
+        wolfVotes: null,
+        wolfVoteConsensus: null,
+        wolfAllies: null,
+        disabledTargets: [],
+        disabledReasons: {},
+      };
+    }
 
     // 构建可用目标列表
     const alivePlayers = this.state.players.filter(
@@ -4303,6 +4439,7 @@ export class GameEngine {
       availableTargets,
       timeout: this.state.config.nightActionTimeout,
       hint,
+      isBlockedByNightmare: false,
       werewolfKillTarget,
       guardProtectTarget,
       wolfVotes,
