@@ -24,8 +24,9 @@ const HunterGun: React.FC = () => {
   // 已开枪则不再显示
   if (gunFired) return null;
 
-  // 判断是否被毒死
-  const isPoisoned = myPlayer.status === 'poisoned';
+  // Bug 8 修复：使用 deathCause 判断是否被毒死，而非 status
+  // 服务端可能将所有死亡玩家状态设为 'dead'，需要通过 deathCause 区分死因
+  const isPoisoned = myPlayer.deathCause === 'witch_poison';
   const poisonBlockGun = ruleConfig.poisonBlockGun;
 
   // 被毒死且规则封印枪 → 显示无法开枪提示

@@ -1,3 +1,4 @@
+import React from 'react';
 import type { PlayerDTO } from '@langrensha/shared';
 
 export interface TargetSelectorProps {
@@ -23,7 +24,7 @@ export interface TargetSelectorProps {
   disabled?: boolean;
 }
 
-export default function TargetSelector({
+function TargetSelector({
   targets,
   players,
   mySeat,
@@ -78,3 +79,5 @@ export default function TargetSelector({
     </div>
   );
 }
+
+export default React.memo(TargetSelector);

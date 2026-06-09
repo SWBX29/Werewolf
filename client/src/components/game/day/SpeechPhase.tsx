@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useGameStore } from '../../../useGameStore';
+import { useVoiceStore } from '../../../store/useVoiceStore';
+import { getZegoVoiceService } from '../../../services/zego';
 import CountdownTimer from '../CountdownTimer';
 import TargetSelector from '../TargetSelector';
 import KnightDuel from '../skills/KnightDuel';
@@ -16,6 +18,9 @@ const SpeechPhase: React.FC = () => {
   const dismissDayAnnouncement = useGameStore((s) => s.dismissDayAnnouncement);
   const speechTimeRemaining = useGameStore((s) => s.speechTimeRemaining);
 
+  const connectionState = useVoiceStore((s) => s.connectionState);
+  const setCanSpeak = useVoiceStore((s) => s.setCanSpeak);
+
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -27,6 +32,29 @@ const SpeechPhase: React.FC = () => {
   // 遗言状态
   const [lastWordsInput, setLastWordsInput] = useState('');
   const [lastWordsSubmitted, setLastWordsSubmitted] = useState(false);
+
+  // Bug 10 修复：白天发言阶段语音控制，添加 players 到依赖数组
+  useEffect(() => {
+    if (!playerState || connectionState !== 'CONNECTED') return;
+
+    const { speechOrder, currentSpeakerIndex } = playerState;
+    const currentSpeakerSeat = speechOrder[currentSpeakerIndex] ?? null;
+    const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
+    const mySeat = myPlayer?.seatNumber ?? 0;
+
+    if (currentSpeakerSeat !== null && currentSpeakerSeat === mySeat && myPlayer?.status === 'alive') {
+      setCanSpeak(true);
+      getZegoVoiceService().muteMicrophone(false);
+    } else {
+      setCanSpeak(false);
+      getZegoVoiceService().muteMicrophone(true);
+    }
+
+    return () => {
+      setCanSpeak(true);
+      getZegoVoiceService().muteMicrophone(false);
+    };
+  }, [playerState?.speechOrder, playerState?.currentSpeakerIndex, playerState?.myPlayerId, connectionState, playerState?.players]);
 
   // 天亮公告：5秒倒计时全屏覆盖 → 倒计时结束后显示内联摘要
   const [showDawnOverlay, setShowDawnOverlay] = useState(false);
@@ -64,14 +92,16 @@ const SpeechPhase: React.FC = () => {
   const currentSpeakerSeat = speechOrder[currentSpeakerIndex] ?? null;
   const isMyTurn = currentSpeakerSeat === mySeat;
 
-  // 使用服务端同步的倒计时，若未启用则回退到本地配置值
-  const speechCountdownSeconds = speechTimeRemaining > 0 ? speechTimeRemaining : ruleConfig.speechTimeout;
+  // Bug 2 修复：使用服务端同步的倒计时，仅在 speechTimeRemaining > 0 时显示
+  // 当 speechTimeRemaining === 0 时，表示正在等待服务端同步，显示"等待中"而非回退到完整超时
+  const speechCountdownSeconds = speechTimeRemaining > 0 ? speechTimeRemaining : null;
 
   const isKnight = myPlayer?.role === 'knight';
   const isWhiteWolfKing = myPlayer?.role === 'white_wolf_king';
 
-  // 判断是否需要发表遗言（被投票出局等场景，自己已死亡且处于发言阶段）
-  const needLastWords = !isAlive && myPlayer?.status === 'dead';
+  // Bug 7 修复：判断是否需要发表遗言（被投票出局等场景，自己已死亡且处于发言阶段）
+  // 需要检查所有死亡状态：dead, poisoned, voted_out
+  const needLastWords = !isAlive && myPlayer?.status !== 'alive';
 
   // 白狼王自爆目标：所有存活玩家（排除自己）
   const wolfExplodeTargets = players
@@ -282,7 +312,11 @@ const SpeechPhase: React.FC = () => {
               </p>
             </div>
           </div>
-          <CountdownTimer seconds={speechCountdownSeconds} urgentThreshold={10} />
+          {speechCountdownSeconds !== null ? (
+            <CountdownTimer seconds={speechCountdownSeconds} urgentThreshold={10} />
+          ) : (
+            <div className="text-sm text-gray-500 animate-pulse">等待发言开始...</div>
+          )}
         </div>
       )}
 
@@ -378,7 +412,11 @@ const SpeechPhase: React.FC = () => {
       {needLastWords && !lastWordsSubmitted && (
         <div className="space-y-2 p-3 bg-gray-900/50 rounded-lg border border-gray-700 animate-fade-in-up">
           <p className="text-sm text-gray-300 font-semibold text-center">📝 请发表遗言</p>
-          <CountdownTimer seconds={speechCountdownSeconds} urgentThreshold={10} />
+          {speechCountdownSeconds !== null ? (
+            <CountdownTimer seconds={speechCountdownSeconds} urgentThreshold={10} />
+          ) : (
+            <div className="text-sm text-gray-500 animate-pulse">等待发言开始...</div>
+          )}
           <div className="flex gap-2">
             <input
               type="text"

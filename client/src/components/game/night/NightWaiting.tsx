@@ -101,10 +101,13 @@ export default function NightWaiting() {
   const round = playerState?.round ?? 1;
   const currentNightRole = playerState?.currentNightRole;
   const myNightAction = playerState?.myNightAction ?? null;
+  const myPlayer = playerState?.players.find((p) => p.id === playerState?.myPlayerId);
+  const isAlive = myPlayer?.status === 'alive';
 
-  // 从 currentNightRole 推断当前行动角色名（所有玩家可见）
+  // Bug 20 修复：只有存活玩家才能看到当前行动角色名，死亡玩家看到通用提示
+  // 这防止信息泄露，避免死亡玩家知道当前哪个角色在行动
   let actingRoleName = '神秘角色';
-  if (currentNightRole) {
+  if (isAlive && currentNightRole) {
     actingRoleName = ROLE_META[currentNightRole]?.name ?? '神秘角色';
   }
 

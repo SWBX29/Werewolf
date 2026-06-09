@@ -297,13 +297,15 @@ const RuleConfigSubSchema = new Schema<RuleConfig>({
   nightActionTimeout: { type: Number, required: true, min: 0, default: 30 },
   speechTimeout: { type: Number, required: true, min: 0, default: 60 },
   voteTimeout: { type: Number, required: true, min: 0, default: 20 },
+  preVoteWaitTime: { type: Number, required: true, min: 0, default: 10 },
+  skillActivationTimeout: { type: Number, required: true, min: 0, default: 15 },
 
   // ---- 身份揭示配置（规则20） ----
   revealIdentityOnDayVote: {
     type: String,
     required: true,
     enum: ['NONE', 'FACTION', 'ROLE'],
-    default: 'FACTION',
+    default: 'NONE',
   },
 
   // ---- 警长选举 ----
@@ -383,9 +385,9 @@ const RoomSchema = new Schema<RoomDocument>({
     type: String,
     required: true,
     enum: [
-      'LOBBY', 'NIGHT', 'NIGHT_SETTLEMENT', 'DAY_ANNOUNCE',
+      'LOBBY', 'ROLE_REVEAL', 'PRE_NIGHT', 'NIGHT', 'NIGHT_SETTLEMENT', 'DAY_ANNOUNCE',
       'SHERIFF_ELECTION', 'SHERIFF_TRANSFER',
-      'DAY_SPEECH', 'DAY_VOTE', 'DAY_SETTLEMENT', 'DAY_INTERRUPT',
+      'DAY_SPEECH', 'PRE_VOTE_WAIT', 'DAY_VOTE', 'DAY_SETTLEMENT', 'DAY_INTERRUPT',
       'PK_VOTE', 'GAME_OVER',
     ],
     default: 'LOBBY',
@@ -488,7 +490,7 @@ const GameLogSchema = new Schema<GameLogDocument>({
       'NIGHT_SETTLEMENT', 'NIGHTMARE_DEFER', 'NIGHTMARE_BLOCK_MODE_DOWNGRADE',
       'WOLF_CHAT_MESSAGE', 'WOLF_VOTE_CAST', 'WOLF_VOTE_CONSENSUS', 'WOLF_VOTE_TIMEOUT_RANDOM',
       // 白天操作
-      'DAY_ANNOUNCE', 'SPEECH_START', 'SPEECH_CONTENT', 'SPEECH_SKIP',
+      'DAY_ANNOUNCE', 'SPEECH_START', 'SPEECH_CONTENT', 'SPEECH_SKIP', 'SPEECH_FINISH',
       'VOTE_CAST', 'VOTE_RESULT', 'PK_VOTE_START',
       // 特殊技能
       'KNIGHT_DUEL', 'WHITE_WOLF_EXPLODE', 'HUNTER_GUN', 'WOLF_KING_GUN', 'IDIOT_REVEAL',
@@ -516,7 +518,7 @@ const GameLogSchema = new Schema<GameLogDocument>({
     enum: [
       'LOBBY', 'NIGHT', 'NIGHT_SETTLEMENT', 'DAY_ANNOUNCE',
       'SHERIFF_ELECTION', 'SHERIFF_TRANSFER',
-      'DAY_SPEECH', 'DAY_VOTE', 'DAY_SETTLEMENT', 'DAY_INTERRUPT',
+      'DAY_SPEECH', 'PRE_VOTE_WAIT', 'DAY_VOTE', 'DAY_SETTLEMENT', 'DAY_INTERRUPT',
       'PK_VOTE', 'GAME_OVER',
     ],
   },

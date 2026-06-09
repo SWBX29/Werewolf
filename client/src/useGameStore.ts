@@ -43,11 +43,13 @@ import type {
   DeathCause,
   RoomDissolvedMessage,
   ActionType,
+  JudgeActionType,
 } from '@langrensha/shared';
 import {
   createDefaultRuleConfig,
   NIGHT_ACTION_ORDER_PRESETS,
 } from '@langrensha/shared';
+import { useVoiceStore } from './store/useVoiceStore';
 
 // ============================================================================
 // 视图路由状态
@@ -158,6 +160,9 @@ interface GameState {
   // ---- 规则26：死亡玩家聊天 ----
   deadChatMessages: Array<{id: string; senderSeat: number; senderNickname: string; content: string; timestamp: number}>;
 
+  // ---- 法官操作通知（玩家视角） ----
+  judgeActions: Array<{ id: string; action: JudgeActionType; message: string; timestamp: number }>;
+
   // ---- 创建房间配置 ----
   ruleConfig: RuleConfig;
 
@@ -171,6 +176,7 @@ interface GameState {
   dismissError: () => void;
   dismissWarning: (index: number) => void;
   dismissAnnouncement: () => void;
+  dismissJudgeAction: (id: string) => void;
 
   // ---- 大厅操作 ----
   createRoom: (nickname: string, gameMode: GameMode, config: RuleConfig) => void;
@@ -232,21 +238,43 @@ interface GameState {
  */
 export function getWsUrl(): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  // 开发环境直连后端端口
-  if (window.location.port === '5173' || window.location.hostname === 'localhost') {
+  // 开发环境直连后端端口（仅本地访问时）
+  if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
     return `${protocol}//localhost:3001`;
   }
-  // 生产环境使用当前域名
-  return `${protocol}//${window.location.host}`;
+  // 远程访问（如通过 ChmlFrp 内网穿透）走 Vite 的 /ws 代理
+  return `${protocol}//${window.location.host}/ws`;
 }
 
 /**
- * 重连间隔常量
+ * 重连策略常量 — 固定间隔 2.5s
  */
-const RECONNECT_DELAY = 1500;  // 固定 1.5 秒重连
+const RECONNECT_FIXED_DELAY = 2500;  // 固定重连间隔 2.5s
+const RECONNECT_MAX_ATTEMPTS = 50;   // 最大重连次数（约 2 分钟后停止）
 
 /**
- * 安排自动重连（固定间隔）
+ * 竞速连接（多线并行）
+ * 同时发起多个 WebSocket 连接，第一个连通的胜出，其余立即关闭
+ */
+const RACE_PARALLEL_COUNT = 3;        // 并行连接数
+const RACE_STAGGER_DELAY = 200;       // 每个连接之间的错开延迟 (ms)
+const RACE_FALLBACK_TIMEOUT = 8000;   // 所有连接都未响应的兜底超时 (ms)
+
+/**
+ * 心跳间隔与超时
+ */
+const HEARTBEAT_INTERVAL = 25000;    // 每 25 秒发送一次心跳
+const HEARTBEAT_TIMEOUT = 10000;     // 心跳超时 10 秒视为断连
+
+/**
+ * 固定重连延迟
+ */
+function getReconnectDelay(_attempts: number): number {
+  return RECONNECT_FIXED_DELAY;
+}
+
+/**
+ * 安排自动重连（固定 2.5s 间隔）
  * 使用 useGameStore.setState 直接更新状态
  */
 function scheduleReconnect(): void {
@@ -258,15 +286,133 @@ function scheduleReconnect(): void {
   }
 
   const attempts = state.reconnectAttempts;
-  console.log(`[WS] 将在 ${RECONNECT_DELAY / 1000}s 后尝试第 ${attempts + 1} 次重连`);
+
+  // 超过最大重连次数，停止重连并通知用户
+  if (attempts >= RECONNECT_MAX_ATTEMPTS) {
+    console.warn(`[WS] 已达最大重连次数 (${RECONNECT_MAX_ATTEMPTS})，停止自动重连`);
+    useGameStore.setState({ isReconnecting: false, error: '连接断开过久，请刷新页面重试' });
+    return;
+  }
+
+  const delay = getReconnectDelay(attempts);
+  console.log(`[WS] 将在 ${(delay / 1000).toFixed(1)}s 后尝试第 ${attempts + 1} 次重连`);
 
   const timer = setTimeout(() => {
     const url = useGameStore.getState().wsUrl || getWsUrl();
     useGameStore.setState({ isReconnecting: true, reconnectTimer: null });
     useGameStore.getState().connect(url);
-  }, RECONNECT_DELAY);
+  }, delay);
 
   useGameStore.setState({ reconnectAttempts: attempts + 1, reconnectTimer: timer, isReconnecting: true });
+}
+
+// ============================================================================
+// 心跳检测 & 页面可见性监听
+// ============================================================================
+
+/** 最后一次收到服务端消息的时间戳 */
+let _lastPongTime = 0;
+
+/** 竞速连接是否正在进行（防止旧竞速干扰新竞速） */
+let _raceInProgress = false;
+
+/** 心跳定时器 */
+let _heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+/** 页面可见性变化监听器 */
+let _visibilityHandler: (() => void) | null = null;
+
+/**
+ * 启动心跳检测
+ * 定期发送 PING 消息，如果超时未收到任何回复则判定连接死亡并触发重连
+ */
+function _startHeartbeat(ws: WebSocket): void {
+  _stopHeartbeat();
+  _lastPongTime = Date.now();
+
+  _heartbeatTimer = setInterval(() => {
+    if (ws.readyState !== WebSocket.OPEN) return;
+
+    const elapsed = Date.now() - _lastPongTime;
+    if (elapsed > HEARTBEAT_INTERVAL + HEARTBEAT_TIMEOUT) {
+      // 超时未收到回复 — 连接可能已死
+      console.warn(`[WS] 心跳超时 (${(elapsed / 1000).toFixed(0)}s 无响应)，强制重连`);
+      ws.close();
+      return;
+    }
+
+    // 发送心跳
+    try {
+      ws.send(JSON.stringify({ type: 'PING' }));
+    } catch {
+      // 发送失败说明连接已断
+      console.warn('[WS] 心跳发送失败，关闭连接');
+      ws.close();
+    }
+  }, HEARTBEAT_INTERVAL);
+}
+
+function _stopHeartbeat(): void {
+  if (_heartbeatTimer) {
+    clearInterval(_heartbeatTimer);
+    _heartbeatTimer = null;
+  }
+}
+
+/**
+ * 启动页面可见性监听
+ * 用户切回前台时检查连接是否仍然存活，如已断开则立即触发重连
+ */
+function _startVisibilityWatch(ws: WebSocket): void {
+  _stopVisibilityWatch();
+
+  if (typeof document === 'undefined') return;
+
+  _visibilityHandler = () => {
+    if (document.visibilityState !== 'visible') return;
+
+    const state = useGameStore.getState();
+    if (state.ws !== ws) return;
+
+    // 页面回到前台 — 检查连接状态
+    if (ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+      console.log('[WS] 页面回到前台，发现连接已断开，立即重连');
+      ws.close(); // 确保 onclose 被触发
+      return;
+    }
+
+    if (ws.readyState === WebSocket.OPEN) {
+      // 连接看起来还在 — 发送一个心跳验证
+      const elapsed = Date.now() - _lastPongTime;
+      if (elapsed > HEARTBEAT_INTERVAL) {
+        console.log(`[WS] 页面回到前台，距上次消息 ${(elapsed / 1000).toFixed(0)}s，发送心跳验证`);
+        try {
+          ws.send(JSON.stringify({ type: 'PING' }));
+        } catch {
+          ws.close();
+        }
+      }
+    }
+  };
+
+  document.addEventListener('visibilitychange', _visibilityHandler);
+}
+
+function _stopVisibilityWatch(): void {
+  if (_visibilityHandler && typeof document !== 'undefined') {
+    document.removeEventListener('visibilitychange', _visibilityHandler);
+    _visibilityHandler = null;
+  }
+}
+
+/**
+ * 清理连接相关资源（心跳 + 可见性监听）
+ */
+function _cleanupConnectionResources(): void {
+  _stopHeartbeat();
+  _stopVisibilityWatch();
+  _lastPongTime = 0;
+  _raceInProgress = false;
 }
 
 // ============================================================================
@@ -342,6 +488,8 @@ export const useGameStore = create<GameState>((set, get) => ({
 
   deadChatMessages: [],
 
+  judgeActions: [],
+
   ruleConfig: createDefaultRuleConfig(),
 
   // ---- HMR 状态恢复 ----
@@ -357,57 +505,112 @@ export const useGameStore = create<GameState>((set, get) => ({
     // 防止重复连接：OPEN 或 CONNECTING 状态都跳过
     if (existingWs && (existingWs.readyState === WebSocket.OPEN || existingWs.readyState === WebSocket.CONNECTING)) return;
 
+    // 清理旧连接的心跳和可见性监听
+    _cleanupConnectionResources();
+
     // 保存服务器地址用于重连
     set({ wsUrl: url });
 
-    const ws = new WebSocket(url);
+    // --- 竞速连接：同时发起多个 WebSocket，第一个连通的胜出 ---
+    const raceTag = `[WS-Race #${Date.now() % 100000}]`;
+    console.log(`${raceTag} 发起 ${RACE_PARALLEL_COUNT} 路并行连接`);
 
-    ws.onopen = () => {
-      // 忽略非当前 WebSocket 的事件（防止旧 ws 干扰）
-      if (get().ws !== ws) return;
+    let settled = false;
+    const candidates: WebSocket[] = [];
+    _raceInProgress = true;
 
-      set({ isConnected: true, isReconnecting: false, reconnectAttempts: 0 });
+    function settleWith(winner: WebSocket, idx: number): void {
+      if (settled) return;
+      // 如果新一轮竞速已开始，当前竞速作废
+      if (!_raceInProgress) {
+        winner.onopen = winner.onmessage = winner.onclose = winner.onerror = null;
+        winner.close();
+        return;
+      }
+      settled = true;
+      _raceInProgress = false;
 
-      // 如果之前有 playerId 和 roomCode，发送重连消息恢复会话
+      console.log(`${raceTag} 连接 #${idx + 1} 胜出 (${Math.round(performance.now())}ms)`);
+      set({ ws: winner, isConnected: true, isReconnecting: false, reconnectAttempts: 0 });
+
+      // 发送重连消息恢复会话
       const { playerId, roomCode } = get();
       if (playerId && roomCode) {
         console.log(`[WS] 发送重连请求: playerId=${playerId}, roomCode=${roomCode}`);
-        ws.send(JSON.stringify({ type: 'RECONNECT', playerId, roomCode }));
+        winner.send(JSON.stringify({ type: 'RECONNECT', playerId, roomCode }));
       }
-    };
 
-    ws.onmessage = (event) => {
-      // 忽略非当前 WebSocket 的消息
-      if (get().ws !== ws) return;
+      // 启动心跳 & 可见性监听
+      _startHeartbeat(winner);
+      _startVisibilityWatch(winner);
 
-      try {
-        const message: ServerMessage = JSON.parse(event.data);
-        handleServerMessage(message, set, get);
-      } catch (e) {
-        console.error('[WS] 消息解析失败:', e);
+      // 关闭落选连接
+      candidates.forEach((ws, i) => {
+        if (ws !== winner) {
+          console.log(`${raceTag} 关闭落选连接 #${i + 1}`);
+          ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+          ws.close();
+        }
+      });
+    }
+
+    for (let i = 0; i < RACE_PARALLEL_COUNT; i++) {
+      setTimeout(() => {
+        if (settled || !_raceInProgress) return;
+
+        const ws = new WebSocket(url);
+        candidates.push(ws);
+
+        ws.onopen = () => {
+          if (settled || !_raceInProgress) { ws.close(); return; }
+          settleWith(ws, i);
+        };
+
+        ws.onmessage = (event) => {
+          if (get().ws !== ws) return;
+          _lastPongTime = Date.now();
+          try {
+            const message: ServerMessage = JSON.parse(event.data);
+            // PONG 消息用于心跳检测，不需要处理
+            if ((message as any).type === 'PONG') return;
+            handleServerMessage(message, set, get);
+          } catch (e) {
+            console.error('[WS] 消息解析失败:', e);
+          }
+        };
+
+        ws.onclose = () => {
+          if (get().ws !== ws) return;
+          _cleanupConnectionResources();
+          if (get().isManualReconnecting) {
+            set({ isConnected: false });
+            return;
+          }
+          set({ isConnected: false });
+          scheduleReconnect();
+        };
+
+        ws.onerror = (error) => {
+          if (get().ws !== ws) return;
+          console.error(`[WS] 连接 #${i + 1} 错误:`, error);
+        };
+      }, i * RACE_STAGGER_DELAY);
+    }
+
+    // 兜底：超时后若仍无胜出，清理所有未决连接并触发重连
+    setTimeout(() => {
+      if (settled || !_raceInProgress) return;
+      console.warn(`${raceTag} 竞速超时 (${RACE_FALLBACK_TIMEOUT}ms)，清理未决连接`);
+      settled = true;
+      _raceInProgress = false;
+      candidates.forEach((ws) => {
+        ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
+        ws.close();
+      });
+      if (!get().isManualReconnecting) {
+        scheduleReconnect();
       }
-    };
-
-    ws.onclose = () => {
-      // 忽略非当前 WebSocket 的关闭事件（防止旧 ws 触发重连循环）
-      if (get().ws !== ws) return;
-
-      if (get().isManualReconnecting) {
-        set({ isConnected: false });
-        return;
-      }
-      set({ isConnected: false });
-      // 自动重连（固定 1.5 秒间隔）
-      scheduleReconnect();
-    };
-
-    ws.onerror = (error) => {
-      // 忽略非当前 WebSocket 的错误
-      if (get().ws !== ws) return;
-      console.error('[WS] 连接错误:', error);
-    };
-
-    set({ ws });
+    }, RACE_FALLBACK_TIMEOUT + (RACE_PARALLEL_COUNT - 1) * RACE_STAGGER_DELAY);
   },
 
   disconnect: () => {
@@ -417,6 +620,8 @@ export const useGameStore = create<GameState>((set, get) => ({
       clearTimeout(timer);
       set({ reconnectTimer: null });
     }
+    // 清理心跳和可见性监听
+    _cleanupConnectionResources();
     const ws = get().ws;
     if (ws) {
       ws.close();
@@ -476,6 +681,10 @@ export const useGameStore = create<GameState>((set, get) => ({
     set({ phaseAnnouncement: null });
   },
 
+  dismissJudgeAction: (id: string) => {
+    set({ judgeActions: get().judgeActions.filter((a) => a.id !== id) });
+  },
+
   // ==========================================================================
   // 大厅操作
   // ==========================================================================
@@ -499,7 +708,16 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
+  // Bug 54 说明：leaveRoom 采用乐观更新策略
+  // 立即重置本地状态以提供即时反馈，不等待服务端确认
+  // 这是有意为之的设计选择，因为：
+  // 1. 离开房间是用户主动操作，服务端几乎不会拒绝
+  // 2. 即使网络延迟，用户也能立即看到离开效果
+  // 3. 如果服务端未收到消息，WebSocket 重连后会自动同步状态
   leaveRoom: () => {
+    // 先退出语音房间（确保语音资源释放）
+    useVoiceStore.getState().leaveVoiceRoom();
+    
     get().sendMessage({ type: 'LEAVE_ROOM' });
     set({
       roomCode: null,
@@ -526,6 +744,7 @@ export const useGameStore = create<GameState>((set, get) => ({
       showArbitration: false,
       arbitrationEvent: null,
       deadChatMessages: [],
+      judgeActions: [],
       preNightHint: null,
       sheriffTransferRequest: null,
       sheriffTransferResult: null,
@@ -723,7 +942,7 @@ export const useGameStore = create<GameState>((set, get) => ({
   // 管理员操作
   // ==========================================================================
 
-  fetchAdminLogs: (roomCode?: string, fromTime?: number, toTime?: number, limit?: number) => {
+  fetchAdminLogs: (roomCode?: string, fromTime?: number, toTime?: number, limit?: number, actionTypes?: ActionType[], phases?: GamePhase[]) => {
     get().sendMessage({
       type: 'ADMIN_FETCH_LOGS',
       secret: get().adminSecret,
@@ -731,6 +950,8 @@ export const useGameStore = create<GameState>((set, get) => ({
       fromTime,
       toTime,
       limit,
+      actionTypes,
+      phases,
     });
   },
 
@@ -808,14 +1029,15 @@ function handleServerMessage(
       if ('config' in state) {
         // 法官视角
         const judgeState = state as JudgeRoomStateDTO;
+        const judgePlayerId = judgeState.players.find((p) => p.isJudge)?.id;
         set({
           judgeState,
           isJudge: true,
           roomCode: judgeState.roomCode,
           gameMode: judgeState.gameMode,
           currentView: 'game',
-          // 法官视角下保存 playerId（用于断连重连）
-          playerId: get().playerId || judgeState.players.find((p) => p.isJudge)?.id || null,
+          // 法官视角下保存 playerId（优先使用消息中的 playerId，用于断连重连）
+          playerId: judgePlayerId || get().playerId,
         });
       } else {
         // 普通玩家视角
@@ -826,12 +1048,21 @@ function handleServerMessage(
 
         // 计算死亡后经过的夜晚数
         let deadNightsElapsed = get().deadNightsElapsed;
-        if (isDead && prevPlayerState) {
-          // 如果从白天阶段进入夜晚阶段，递增计数
-          const prevPhase = prevPlayerState.phase;
-          const newPhase = playerState.phase;
-          if (prevPhase !== 'NIGHT' && newPhase === 'NIGHT') {
-            deadNightsElapsed += 1;
+        if (isDead) {
+          // 如果玩家刚死亡（之前不是死亡状态），初始化计数
+          const prevMyPlayer = prevPlayerState?.players.find((p) => p.id === prevPlayerState.myPlayerId);
+          const wasDead = prevMyPlayer && prevMyPlayer.status !== 'alive';
+          
+          if (!wasDead) {
+            // 玩家刚死亡，初始化为 0（死亡当晚不算）
+            deadNightsElapsed = 0;
+          } else if (prevPlayerState) {
+            // 玩家已死亡，如果从白天阶段进入夜晚阶段，递增计数
+            const prevPhase = prevPlayerState.phase;
+            const newPhase = playerState.phase;
+            if (prevPhase !== 'NIGHT' && newPhase === 'NIGHT') {
+              deadNightsElapsed += 1;
+            }
           }
         }
 
@@ -858,8 +1089,8 @@ function handleServerMessage(
           preNightHint: playerState.preNightHint ?? null,
           // 重连时自动确认角色，防止 NightPhase 等组件因 roleConfirmed=false 返回空
           roleConfirmed: autoConfirmRole ? true : get().roleConfirmed,
-          // 保存 playerId（用于断连重连）
-          playerId: get().playerId || playerState.myPlayerId || null,
+          // 保存 playerId（优先使用消息中的 playerId，确保重连后 playerId 正确）
+          playerId: playerState.myPlayerId || get().playerId,
         });
       }
       break;
@@ -874,6 +1105,7 @@ function handleServerMessage(
         NIGHT_SETTLEMENT: '夜间结算中',
         DAY_ANNOUNCE: '天亮了',
         DAY_SPEECH: '发言阶段',
+        PRE_VOTE_WAIT: '投票前等待',
         DAY_VOTE: '投票阶段',
         DAY_SETTLEMENT: '白天结算中',
         DAY_INTERRUPT: '白天中断',
@@ -894,8 +1126,12 @@ function handleServerMessage(
       if (message.phase !== 'DAY_SPEECH') {
         updates.speechTimeRemaining = 0;
       }
+      // Bug 2 修复：当仍在 DAY_SPEECH 阶段时（发言者切换），不重置 speechTimeRemaining
+      // 新的 SPEECH_COUNTDOWN 消息会很快到达并更新正确的倒计时值
       if (message.phase === 'PRE_NIGHT') {
-        updates.phaseTimeRemaining = 5;
+        // Bug 3 修复：使用可配置的技能发动等待时间
+        const skillTimeout = get().ruleConfig?.skillActivationTimeout || 15;
+        updates.phaseTimeRemaining = skillTimeout;
       }
       // 非 LOBBY / ROLE_REVEAL 阶段且玩家已有角色 → 自动确认
       // 注意：不能依赖 playerState.phase === 'ROLE_REVEAL'，因为 ROOM_STATE
@@ -1025,6 +1261,7 @@ function handleServerMessage(
           showArbitration: false,
           arbitrationEvent: null,
           deadChatMessages: [],
+          judgeActions: [],
           preNightHint: null,
           sheriffTransferRequest: null,
           sheriffTransferResult: null,
@@ -1050,6 +1287,23 @@ function handleServerMessage(
           data: message.data,
         }],
       });
+      break;
+    }
+
+    case 'JUDGE_ACTION': {
+      const actionId = `ja_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      set({
+        judgeActions: [...get().judgeActions, {
+          id: actionId,
+          action: message.action,
+          message: message.message,
+          timestamp: Date.now(),
+        }],
+      });
+      // 5秒后自动移除通知
+      setTimeout(() => {
+        set({ judgeActions: get().judgeActions.filter((a) => a.id !== actionId) });
+      }, 5000);
       break;
     }
 
@@ -1083,9 +1337,23 @@ function handleServerMessage(
     }
 
     case 'WOLF_CHAT_HISTORY': {
-      // 狼人聊天消息 — 存储到 playerState 中
+      // 狼人聊天消息 — 存储到 playerState 或 judgeState 中
       const currentState = get().playerState;
-      if (currentState) {
+      const currentJudgeState = get().judgeState;
+      
+      if (get().isJudge && currentJudgeState) {
+        // 法官视角：追加到 judgeState.wolfChatMessages
+        set({
+          judgeState: {
+            ...currentJudgeState,
+            wolfChatMessages: [
+              ...(currentJudgeState.wolfChatMessages || []),
+              ...message.messages,
+            ],
+          },
+        });
+      } else if (currentState) {
+        // 玩家视角：追加到 playerState.wolfChatMessages
         set({
           playerState: {
             ...currentState,

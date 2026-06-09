@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 
 /**
  * 可复用倒计时组件
@@ -10,30 +10,38 @@ interface CountdownTimerProps {
   urgentThreshold?: number;
 }
 
-export default function CountdownTimer({
+function CountdownTimer({
   seconds,
   onExpire,
   urgentThreshold = 10,
 }: CountdownTimerProps) {
   const [remaining, setRemaining] = useState(seconds);
   const onExpireRef = useRef(onExpire);
+  // Bug 5 修复：添加标记防止 onExpire 多次触发
+  const hasExpiredRef = useRef(false);
+  
   onExpireRef.current = onExpire;
 
+  // 当 seconds prop 变化时重置状态
   useEffect(() => {
     setRemaining(seconds);
+    hasExpiredRef.current = false;
   }, [seconds]);
 
+  // Bug 5 修复：使用单个 interval，不依赖 remaining
   useEffect(() => {
-    if (remaining <= 0) {
-      onExpireRef.current?.();
-      return;
-    }
+    if (seconds <= 0) return;
 
     const timer = setInterval(() => {
       setRemaining((prev) => {
         const next = prev - 1;
         if (next <= 0) {
           clearInterval(timer);
+          // 仅在首次到期时触发 onExpire
+          if (!hasExpiredRef.current) {
+            hasExpiredRef.current = true;
+            onExpireRef.current?.();
+          }
           return 0;
         }
         return next;
@@ -41,7 +49,7 @@ export default function CountdownTimer({
     }, 1000);
 
     return () => clearInterval(timer);
-  }, [remaining]);
+  }, [seconds]); // 仅依赖 seconds，不依赖 remaining
 
   const progress = seconds > 0 ? (remaining / seconds) * 100 : 0;
 
@@ -68,3 +76,5 @@ export default function CountdownTimer({
     </div>
   );
 }
+
+export default React.memo(CountdownTimer);

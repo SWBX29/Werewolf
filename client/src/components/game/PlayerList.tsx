@@ -1,20 +1,23 @@
-import { useState } from 'react';
+import React, { useState } from 'react';
 import { useGameStore } from '../../useGameStore';
+import { useVoiceStore } from '../../store/useVoiceStore';
 import type { PlayerDTO } from '@langrensha/shared';
 import { ROLE_META } from '@langrensha/shared';
 
 /**
  * 玩家/座位列表组件
- * 显示所有玩家的座位号、昵称、存活状态
+ * 显示所有玩家的座位号、昵称、存活状态、发言顺序
  */
 interface PlayerListProps {
   compact?: boolean;
 }
 
-export default function PlayerList({ compact = false }: PlayerListProps) {
+function PlayerList({ compact = false }: PlayerListProps) {
   const playerState = useGameStore((s) => s.playerState);
   const judgeState = useGameStore((s) => s.judgeState);
   const isJudge = useGameStore((s) => s.isJudge);
+  const connectionState = useVoiceStore((s) => s.connectionState);
+  const speakingUsers = useVoiceStore((s) => s.speakingUsers);
   const [popoverSeat, setPopoverSeat] = useState<number | null>(null);
 
   if (!playerState && !judgeState) return null;
@@ -46,6 +49,12 @@ export default function PlayerList({ compact = false }: PlayerListProps) {
       ? speechOrder[currentSpeakerIndex]
       : null;
 
+  // 构建座位号 → 发言顺序位置映射
+  const speechOrderMap = new Map<number, number>();
+  if (isSpeechPhase && speechOrder.length > 0) {
+    speechOrder.forEach((seat, index) => speechOrderMap.set(seat, index));
+  }
+
   const gridCols = compact ? 'grid-cols-6' : 'grid-cols-4';
 
   // 生成所有座位号（1 ~ totalSeats），按号数由小到大排列
@@ -75,6 +84,11 @@ export default function PlayerList({ compact = false }: PlayerListProps) {
           const isSpeaking = speakingSeat === p.seatNumber;
           const isMuted = p.isMuted;
 
+          // 发言顺序位置（-1 表示不在发言列表中，如已死亡）
+          const speechIndex = speechOrderMap.get(p.seatNumber) ?? -1;
+          const hasSpoken = isSpeechPhase && speechIndex >= 0 && speechIndex < currentSpeakerIndex;
+          const yetToSpeak = isSpeechPhase && speechIndex >= 0 && speechIndex > currentSpeakerIndex;
+
           // 组合 CSS 类
           let seatClass = 'seat-cell';
           if (isDead) seatClass += ' seat-dead';
@@ -82,6 +96,7 @@ export default function PlayerList({ compact = false }: PlayerListProps) {
           if (isSelf) seatClass += ' seat-self';
           if (isMuted) seatClass += ' seat-muted';
           if (isSpeaking) seatClass += ' seat-speaking';
+          if (hasSpoken && !isDead) seatClass += ' opacity-50';
 
           return (
             <div
@@ -91,8 +106,21 @@ export default function PlayerList({ compact = false }: PlayerListProps) {
                 if (isSelf) setPopoverSeat(popoverSeat === p.seatNumber ? null : p.seatNumber);
               }}
             >
-              {/* 座位号 */}
-              <span className="text-xs font-bold text-gray-400">{p.seatNumber}号</span>
+              {/* 座位号 + 发言顺序号 */}
+              <div className="flex items-center gap-1">
+                <span className="text-xs font-bold text-gray-400">{p.seatNumber}号</span>
+                {isSpeechPhase && speechIndex >= 0 && !isDead && !compact && (
+                  <span className={`text-xs px-1 rounded ${
+                    isSpeaking
+                      ? 'bg-amber-700/60 text-amber-200'
+                      : hasSpoken
+                        ? 'bg-gray-700/60 text-gray-500'
+                        : 'bg-night-700/60 text-gray-400'
+                  }`}>
+                    #{speechIndex + 1}
+                  </span>
+                )}
+              </div>
 
               {/* 昵称 */}
               <span className={`text-sm truncate max-w-full ${isDead ? 'text-gray-500' : 'text-gray-200'}`}>
@@ -107,6 +135,17 @@ export default function PlayerList({ compact = false }: PlayerListProps) {
                 {isMuted && <span className="text-xs">🔇</span>}
                 {isSpeaking && !isDead && (
                   <span className="text-xs text-amber-400">🎤</span>
+                )}
+                {/* 发言状态标签（非紧凑模式） */}
+                {!compact && !isDead && isSpeechPhase && !isSpeaking && (
+                  <>
+                    {hasSpoken && (
+                      <span className="text-xs text-gray-500">已发言</span>
+                    )}
+                    {yetToSpeak && (
+                      <span className="text-xs text-gray-400">待发言</span>
+                    )}
+                  </>
                 )}
               </div>
             </div>
@@ -139,3 +178,5 @@ export default function PlayerList({ compact = false }: PlayerListProps) {
     </div>
   );
 }
+
+export default React.memo(PlayerList);

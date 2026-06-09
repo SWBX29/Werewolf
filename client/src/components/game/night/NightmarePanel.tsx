@@ -44,7 +44,7 @@ export default function NightmarePanel() {
       </div>
 
       <p className="text-sm text-gray-400 mb-4">
-        选择一名玩家施以恐惧，使其当夜所有技能失效。不可恐惧自己，不可重复恐惧同一人。
+        选择一名玩家施以恐惧，使其当夜所有技能失效。不可恐惧自己，不可重复恐惧同一人。可恐惧狼人阵营角色。
       </p>
 
       {/* 目标选择 */}

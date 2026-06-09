@@ -34,6 +34,7 @@ import {
   ROOM_CODE_CHARSET,
   ROOM_CODE_LENGTH,
   createDefaultRuleConfig,
+  isEvilRole,
 } from '@langrensha/shared';
 import { GameEngine, VoteResultCallback, GameOverCallback, IdentityRevealCallback } from './GameEngine.js';
 
@@ -108,6 +109,29 @@ export class LobbyManager {
 
   /** WebSocket → playerId 映射（用于快速查找） */
   private wsToPlayerId: Map<any, string> = new Map();
+
+  /** 房间→客户端反向索引：key 为 roomCode，value 为该房间的 playerId 集合 */
+  private roomClientsIndex: Map<string, Set<string>> = new Map();
+
+  /** 将玩家加入房间索引 */
+  private addToRoomIndex(roomCode: string, playerId: string): void {
+    let set = this.roomClientsIndex.get(roomCode);
+    if (!set) {
+      set = new Set();
+      this.roomClientsIndex.set(roomCode, set);
+    }
+    set.add(playerId);
+  }
+
+  /** 将玩家从房间索引中移除 */
+  private removeFromRoomIndex(roomCode: string | null, playerId: string): void {
+    if (!roomCode) return;
+    const set = this.roomClientsIndex.get(roomCode);
+    if (set) {
+      set.delete(playerId);
+      if (set.size === 0) this.roomClientsIndex.delete(roomCode);
+    }
+  }
 
   /** 玩家 ID 计数器 */
   private playerIdCounter = 0;
@@ -209,6 +233,7 @@ export class LobbyManager {
         console.log(`[Lobby] 玩家 ${playerId} 重连超时，执行离开房间 ${roomCode}`);
         ctx.gracePeriodTimer = null;
         this.leaveRoom(playerId);
+        this.removeFromRoomIndex(ctx.roomCode, playerId);
         this.clients.delete(playerId);
       }
     }, 60 * 1000); // 60秒宽限期
@@ -281,6 +306,7 @@ export class LobbyManager {
       if (ctx.ws && this.wsToPlayerId.get(ctx.ws) === playerId) {
         this.wsToPlayerId.delete(ctx.ws);
       }
+      this.removeFromRoomIndex(ctx.roomCode, playerId);
       this.clients.delete(playerId);
     }
   }
@@ -482,6 +508,7 @@ export class LobbyManager {
       hostPlayer.id = existingPlayerId;
       existingContext.nickname = hostNickname.trim();
       existingContext.roomCode = roomCode;
+      this.addToRoomIndex(roomCode, existingPlayerId);
       existingContext.isJudge = isJudge;
       contextPlayerId = existingPlayerId;
     } else {
@@ -489,6 +516,7 @@ export class LobbyManager {
       hostPlayer.id = context.playerId;
       context.nickname = hostNickname.trim();
       context.roomCode = roomCode;
+      this.addToRoomIndex(roomCode, context.playerId);
       context.isJudge = isJudge;
       contextPlayerId = context.playerId;
     }
@@ -548,9 +576,9 @@ export class LobbyManager {
       return { success: false, error: '房间已满' };
     }
 
-    // 校验昵称是否重复
+    // 校验昵称是否重复（大小写不敏感）
     const nicknameExists = state.players.some(
-      (p) => p.nickname === nickname.trim(),
+      (p) => p.nickname.toLowerCase() === nickname.trim().toLowerCase(),
     );
     if (nicknameExists) {
       return { success: false, error: '该昵称已被使用' };
@@ -570,12 +598,14 @@ export class LobbyManager {
       const existingContext = this.clients.get(existingPlayerId)!;
       existingContext.nickname = nickname.trim();
       existingContext.roomCode = roomCode.toUpperCase();
+      this.addToRoomIndex(roomCode.toUpperCase(), existingPlayerId);
       existingContext.isJudge = false;
       contextPlayerId = existingPlayerId;
     } else {
       const context = this.registerConnection(playerWs);
       context.nickname = nickname.trim();
       context.roomCode = roomCode.toUpperCase();
+      this.addToRoomIndex(roomCode.toUpperCase(), context.playerId);
       context.isJudge = false;
       contextPlayerId = context.playerId;
     }
@@ -650,6 +680,7 @@ export class LobbyManager {
     const engine = this.rooms.get(context.roomCode);
     if (!engine) {
       // 房间已不存在，仅清理上下文
+      this.removeFromRoomIndex(context.roomCode, playerId);
       context.roomCode = null;
       return { success: true, roomCode: undefined };
     }
@@ -658,6 +689,7 @@ export class LobbyManager {
     const playerIndex = state.players.findIndex((p) => p.id === playerId);
 
     if (playerIndex === -1) {
+      this.removeFromRoomIndex(context.roomCode, playerId);
       context.roomCode = null;
       return { success: true, roomCode: undefined };
     }
@@ -726,6 +758,7 @@ export class LobbyManager {
 
     // 游戏进行中时保留 roomCode 以支持断线重连，仅大厅阶段清除
     if (state.phase === 'LOBBY') {
+      this.removeFromRoomIndex(context.roomCode, playerId);
       context.roomCode = null;
     }
 
@@ -735,7 +768,7 @@ export class LobbyManager {
   /**
    * 法官解散房间 — 销毁房间，返回所有玩家信息供广播
    */
-  dissolveRoom(playerId: string): { success: boolean; error?: string; roomCode?: string; players?: Array<{ seatNumber: number; nickname: string; role: RoleId; status: PlayerStatus }> } {
+  dissolveRoom(playerId: string): { success: boolean; error?: string; roomCode?: string; players?: Array<{ seatNumber: number; nickname: string; role: RoleId | null; status: PlayerStatus | null }> } {
     const context = this.clients.get(playerId);
     if (!context || !context.roomCode) {
       return { success: false, error: '你不在任何房间中' };
@@ -760,19 +793,22 @@ export class LobbyManager {
       .map((p) => ({
         seatNumber: p.seatNumber,
         nickname: p.nickname,
-        role: p.role,
-        status: p.status,
+        role: state.phase === 'LOBBY' ? null : p.role,
+        status: state.phase === 'LOBBY' ? null : p.status,
       }));
 
     // 销毁房间引擎
     engine.destroy();
     this.rooms.delete(roomCode);
 
-    // 清理所有该房间客户端的 roomCode
-    for (const ctx of this.clients.values()) {
-      if (ctx.roomCode === roomCode) {
-        ctx.roomCode = null;
+    // 通过反向索引 O(k) 清理该房间的所有客户端
+    const roomPlayerIds = this.roomClientsIndex.get(roomCode);
+    if (roomPlayerIds) {
+      for (const pid of roomPlayerIds) {
+        const ctx = this.clients.get(pid);
+        if (ctx) ctx.roomCode = null;
       }
+      this.roomClientsIndex.delete(roomCode);
     }
 
     return { success: true, roomCode, players };
@@ -841,11 +877,12 @@ export class LobbyManager {
    * 获取房间中的所有客户端
    */
   getRoomClients(roomCode: string): ClientContext[] {
+    const playerIds = this.roomClientsIndex.get(roomCode);
+    if (!playerIds) return [];
     const clients: ClientContext[] = [];
-    for (const context of this.clients.values()) {
-      if (context.roomCode === roomCode) {
-        clients.push(context);
-      }
+    for (const pid of playerIds) {
+      const ctx = this.clients.get(pid);
+      if (ctx) clients.push(ctx);
     }
     return clients;
   }
@@ -942,10 +979,7 @@ export class LobbyManager {
 
     // 校验狼人数量合理性
     const evilCount = Object.entries(config.roleDistribution)
-      .filter(([roleId]) => {
-        const meta = { villager: 'good', seer: 'good', witch: 'good', hunter: 'good', guard: 'good', idiot: 'good', knight: 'good', werewolf: 'evil', white_wolf_king: 'evil', wolf_king: 'evil', nightmare_shadow: 'evil', hidden_wolf: 'evil' } as Record<string, string>;
-        return meta[roleId] === 'evil';
-      })
+      .filter(([roleId]) => isEvilRole(roleId as RoleId))
       .reduce((sum, [, count]) => sum + (count || 0), 0);
 
     if (evilCount < 1) {
@@ -1149,5 +1183,6 @@ export class LobbyManager {
     this.rooms.clear();
     this.clients.clear();
     this.wsToPlayerId.clear();
+    this.roomClientsIndex.clear();
   }
 }

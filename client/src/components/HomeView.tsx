@@ -14,7 +14,7 @@
  * ============================================================================
  */
 
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useGameStore, getWsUrl } from '../useGameStore';
 import type {
   RoleId,
@@ -77,6 +77,9 @@ const HomeView: React.FC = () => {
   const [createNickname, setCreateNickname] = useState('');
   const [createGameMode, setCreateGameMode] = useState<GameMode>('HUMAN');
 
+  // Bug 4 修复：使用 ref 防止重复点击和追踪连接等待状态
+  const isConnectingRef = useRef(false);
+
   // Zustand store
   const {
     createRoom,
@@ -91,33 +94,58 @@ const HomeView: React.FC = () => {
     connect,
   } = useGameStore();
 
+  // Bug 4 修复：等待 WebSocket 连接建立的辅助函数
+  const waitForConnection = (): Promise<void> => {
+    return new Promise((resolve) => {
+      if (useGameStore.getState().isConnected) {
+        resolve();
+        return;
+      }
+      
+      // 防止重复连接
+      if (!isConnectingRef.current) {
+        isConnectingRef.current = true;
+        connect(getWsUrl());
+      }
+      
+      // 轮询检查连接状态（最多等待 10 秒）
+      let attempts = 0;
+      const maxAttempts = 100; // 100 * 100ms = 10s
+      const checkInterval = setInterval(() => {
+        attempts++;
+        if (useGameStore.getState().isConnected) {
+          clearInterval(checkInterval);
+          isConnectingRef.current = false;
+          resolve();
+        } else if (attempts >= maxAttempts) {
+          clearInterval(checkInterval);
+          isConnectingRef.current = false;
+          setError('连接服务器超时，请检查网络后重试');
+          resolve(); // 仍然 resolve，但会显示错误
+        }
+      }, 100);
+    });
+  };
+
   // ---- 加入房间 ----
-  const handleJoin = () => {
+  const handleJoin = async () => {
     if (!joinNickname.trim()) return;
     if (!joinRoomCode.trim()) return;
 
-    // 确保 WebSocket 已连接
-    if (!useGameStore.getState().isConnected) {
-      connect(getWsUrl());
-      // 等待连接建立后再发送消息
-      setTimeout(() => {
-        joinRoom(joinNickname.trim(), joinRoomCode.trim().toUpperCase());
-      }, 500);
-    } else {
+    // Bug 4 修复：等待连接建立后再发送消息
+    await waitForConnection();
+    if (useGameStore.getState().isConnected) {
       joinRoom(joinNickname.trim(), joinRoomCode.trim().toUpperCase());
     }
   };
 
   // ---- 创建房间 ----
-  const handleCreate = () => {
+  const handleCreate = async () => {
     if (!createNickname.trim()) return;
 
-    if (!useGameStore.getState().isConnected) {
-      connect(getWsUrl());
-      setTimeout(() => {
-        createRoom(createNickname.trim(), createGameMode, ruleConfig);
-      }, 500);
-    } else {
+    // Bug 4 修复：等待连接建立后再发送消息
+    await waitForConnection();
+    if (useGameStore.getState().isConnected) {
       createRoom(createNickname.trim(), createGameMode, ruleConfig);
     }
   };

@@ -22,27 +22,42 @@
  * ============================================================================
  */
 
-import React from 'react';
+import React, { useEffect, lazy, Suspense } from 'react';
 import { useGameStore } from '../../useGameStore';
+import { useVoiceStore } from '../../store/useVoiceStore';
+import { getZegoVoiceService } from '../../services/zego';
 import { ROLE_META } from '@langrensha/shared';
+
+// 始终渲染的核心组件 — 同步导入
 import StatusBar from './StatusBar';
 import PlayerList from './PlayerList';
-import RoleReveal from './RoleReveal';
-import NightPhase from './night/NightPhase';
-import SpeechPhase from './day/SpeechPhase';
-import VotePhase from './day/VotePhase';
-import SheriffElection from './day/SheriffElection';
-import SheriffTransfer from './day/SheriffTransfer';
-import DayAnnounce from './day/DayAnnounce';
-import SpectatorMode from './SpectatorMode';
 import AppealButton from './AppealButton';
-import GameOver from './GameOver';
-import WhiteWolfExplode from './skills/WhiteWolfExplode';
-import HunterGun from './skills/HunterGun';
-import WolfKingGun from './skills/WolfKingGun';
-import IdiotReveal from './skills/IdiotReveal';
-
+import VoiceControlBar from './VoiceControlBar';
+import JudgeActionToast from './JudgeActionToast';
 import CountdownTimer from './CountdownTimer';
+
+// 按游戏阶段条件渲染的组件 — 懒加载，按需拉取
+const RoleReveal = lazy(() => import('./RoleReveal'));
+const NightPhase = lazy(() => import('./night/NightPhase'));
+const SpeechPhase = lazy(() => import('./day/SpeechPhase'));
+const VotePhase = lazy(() => import('./day/VotePhase'));
+const SheriffElection = lazy(() => import('./day/SheriffElection'));
+const SheriffTransfer = lazy(() => import('./day/SheriffTransfer'));
+const DayAnnounce = lazy(() => import('./day/DayAnnounce'));
+const SpectatorMode = lazy(() => import('./SpectatorMode'));
+const GameOver = lazy(() => import('./GameOver'));
+const WhiteWolfExplode = lazy(() => import('./skills/WhiteWolfExplode'));
+const HunterGun = lazy(() => import('./skills/HunterGun'));
+const WolfKingGun = lazy(() => import('./skills/WolfKingGun'));
+const IdiotReveal = lazy(() => import('./skills/IdiotReveal'));
+const KnightDuel = lazy(() => import('./skills/KnightDuel'));
+
+// 阶段切换时的轻量加载指示器
+const PhaseLoading: React.FC = () => (
+  <div className="flex-1 flex items-center justify-center">
+    <div className="w-6 h-6 border-2 border-night-600 border-t-night-300 rounded-full animate-spin" />
+  </div>
+);
 
 const GameView: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
@@ -52,6 +67,53 @@ const GameView: React.FC = () => {
   const leaveRoom = useGameStore((s) => s.leaveRoom);
   const phaseAnnouncement = useGameStore((s) => s.phaseAnnouncement);
   const dismissAnnouncement = useGameStore((s) => s.dismissAnnouncement);
+  
+  // 语音状态
+  const connectionState = useVoiceStore((s) => s.connectionState);
+  const nightVoiceMode = useVoiceStore((s) => s.nightVoiceMode);
+  const joinVoiceRoom = useVoiceStore((s) => s.joinVoiceRoom);
+  const setNightVoiceMode = useVoiceStore((s) => s.setNightVoiceMode);
+  const setVoiceStatusHint = useVoiceStore((s) => s.setVoiceStatusHint);
+
+  // 白天阶段恢复语音连接
+  useEffect(() => {
+    if (!playerState) return;
+    
+    const phase = playerState.phase;
+    const isNightPhase = ['NIGHT', 'NIGHT_SETTLEMENT', 'PRE_NIGHT'].includes(phase);
+    const isDayPhase = ['DAY_ANNOUNCE', 'DAY_SPEECH', 'PRE_VOTE_WAIT', 'DAY_VOTE', 'PK_VOTE', 'SHERIFF_ELECTION', 'SHERIFF_TRANSFER', 'DAY_SETTLEMENT', 'DAY_INTERRUPT'].includes(phase);
+    
+    // 定时器引用（用于 cleanup）
+    let hintTimer: ReturnType<typeof setTimeout> | null = null;
+    
+    // 从夜晚切换到白天时，恢复语音连接
+    if (!isNightPhase && nightVoiceMode && isDayPhase) {
+      const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
+      if (myPlayer && myPlayer.status === 'alive' && connectionState === 'DISCONNECTED') {
+        // 恢复语音连接
+        const roomID = playerState.roomCode;
+        const userID = playerState.myPlayerId;
+        const userName = myPlayer.nickname;
+        joinVoiceRoom(roomID, userID, userName);
+        
+        // 设置状态提示为"天亮了"
+        setNightVoiceMode(false);
+        setVoiceStatusHint('天亮了');
+        
+        // 3秒后清除状态提示
+        hintTimer = setTimeout(() => {
+          setVoiceStatusHint(null);
+        }, 3000);
+      }
+    }
+    
+    // 清理定时器
+    return () => {
+      if (hintTimer) {
+        clearTimeout(hintTimer);
+      }
+    };
+  }, [playerState?.phase, nightVoiceMode, connectionState]);
 
   // 房间解散 → 显示解散界面（优先级最高）
   if (roomDissolvedData) {
@@ -80,12 +142,12 @@ const GameView: React.FC = () => {
   // 角色未确认且处于身份展示阶段 → 显示角色揭示（自动倒计时，无需点击）
   // 限定仅在 ROLE_REVEAL 阶段渲染，防止身份展示结束后再次弹出"确认知晓"按钮
   if (!roleConfirmed && myRole && playerState.phase === 'ROLE_REVEAL') {
-    return <RoleReveal />;
+    return <Suspense fallback={<PhaseLoading />}><RoleReveal /></Suspense>;
   }
 
   // 游戏结束 → 显示结束界面
   if (gameOverData) {
-    return <GameOver />;
+    return <Suspense fallback={<PhaseLoading />}><GameOver /></Suspense>;
   }
 
   // 判断当前主面板内容
@@ -121,6 +183,9 @@ const GameView: React.FC = () => {
 
       case 'DAY_SPEECH':
         return <SpeechPhase />;
+
+      case 'PRE_VOTE_WAIT':
+        return <PreVoteWaitPanel />;
 
       case 'DAY_VOTE':
       case 'PK_VOTE':
@@ -163,14 +228,17 @@ const GameView: React.FC = () => {
     );
   };
 
-  // 背景样式根据阶段切换
-  const isNight = ['NIGHT', 'NIGHT_SETTLEMENT'].includes(playerState.phase);
-  const bgClass = isNight ? 'bg-night-phase' : 'bg-night-950';
+  // Bug 21 修复：背景样式根据阶段切换，白天使用明亮的背景
+  const isNight = ['NIGHT', 'NIGHT_SETTLEMENT', 'PRE_NIGHT'].includes(playerState.phase);
+  const bgClass = isNight ? 'bg-night-phase' : 'bg-gradient-to-b from-amber-950/50 to-night-950';
 
   return (
     <div className={`min-h-screen flex flex-col ${bgClass}`}>
       {/* 顶部状态栏 */}
       <StatusBar />
+
+      {/* 法官操作通知 Toast */}
+      <JudgeActionToast />
 
       {/* 阶段公告横幅 */}
       {phaseAnnouncement && (
@@ -185,16 +253,18 @@ const GameView: React.FC = () => {
         </div>
       )}
 
-      {/* 主面板区域 */}
-      <div className="flex-1 overflow-hidden flex flex-col">
-        {/* 死亡玩家 → 观战模式（替代主面板） */}
-        {!isAlive && myPlayer && playerState.phase !== 'LOBBY' && (
-          <SpectatorMode />
-        )}
+      {/* 主面板区域 — Suspense 包裹按阶段懒加载的组件 */}
+      <Suspense fallback={<PhaseLoading />}>
+        <div className="flex-1 overflow-hidden flex flex-col">
+          {/* 死亡玩家 → 观战模式（替代主面板） */}
+          {!isAlive && myPlayer && playerState.phase !== 'LOBBY' && (
+            <SpectatorMode />
+          )}
 
-        {/* 主面板：存活玩家 或 大厅阶段 */}
-        {(isAlive || playerState.phase === 'LOBBY') && renderMainPanel()}
-      </div>
+          {/* 主面板：存活玩家 或 大厅阶段 */}
+          {(isAlive || playerState.phase === 'LOBBY') && renderMainPanel()}
+        </div>
+      </Suspense>
 
       {/* 底部信息栏 */}
       <div className="border-t border-night-800 bg-night-900/80 backdrop-blur-sm">
@@ -215,7 +285,7 @@ const GameView: React.FC = () => {
           {/* 操作按钮 */}
           <div className="flex items-center gap-2">
             {/* 自己的角色标识 */}
-            {myRole && (
+            {myRole && ROLE_META[myRole] && (
               <button
                 className="text-xs px-2 py-1 rounded bg-night-800 border border-night-600 hover:border-wolf-500 transition-colors"
                 title={`${ROLE_META[myRole].name} · ${mySeat}号`}
@@ -236,8 +306,13 @@ const GameView: React.FC = () => {
       {/* 申诉按钮（浮动） */}
       <AppealButton />
 
-      {/* 技能覆盖层（白狼王自爆、猎人开枪、狼王开枪、白痴翻牌） */}
-      {renderSkillOverlays()}
+      {/* 语音控制栏 */}
+      <VoiceControlBar />
+
+      {/* 技能覆盖层（白狼王自爆、猎人开枪、狼王开枪、白痴翻牌）— 懒加载 */}
+      <Suspense fallback={null}>
+        {renderSkillOverlays()}
+      </Suspense>
     </div>
   );
 };
@@ -250,6 +325,17 @@ const LobbyPanel: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
   const setReady = useGameStore((s) => s.setReady);
   const startGame = useGameStore((s) => s.startGame);
+  const connectionState = useVoiceStore((s) => s.connectionState);
+  const speakingUsers = useVoiceStore((s) => s.speakingUsers);
+
+  // LOBBY 阶段：自由语音，所有人可以说话
+  useEffect(() => {
+    if (connectionState !== 'CONNECTED') return;
+    getZegoVoiceService().muteMicrophone(false);
+    getZegoVoiceService().resetRemoteAudio();
+    useVoiceStore.getState().setCanSpeak(true);
+    useVoiceStore.getState().setMicrophoneMuted(false);
+  }, [connectionState]);
 
   if (!playerState) return null;
 
@@ -298,6 +384,8 @@ const LobbyPanel: React.FC = () => {
               );
             }
 
+            const isSpeaking = speakingUsers[p.id] !== undefined;
+
             return (
               <div
                 key={p.id}
@@ -307,9 +395,15 @@ const LobbyPanel: React.FC = () => {
                     : 'bg-night-800'
                 }`}
               >
-                <span className="text-sm">
-                  {p.seatNumber}号 {p.nickname}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-sm">
+                    {p.seatNumber}号 {p.nickname}
+                  </span>
+                  {/* 说话状态指示 */}
+                  {connectionState === 'CONNECTED' && isSpeaking && (
+                    <span className="text-amber-400 text-xs animate-pulse">💬 说话中</span>
+                  )}
+                </div>
                 <span className={`text-xs ${p.isReady ? 'text-green-400' : 'text-gray-500'}`}>
                   {p.isReady ? '已准备' : '未准备'}
                 </span>
@@ -427,9 +521,11 @@ const InterruptPanel: React.FC = () => {
 const PreNightWait: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
   const phaseTimeRemaining = useGameStore((s) => s.phaseTimeRemaining);
+  const ruleConfig = useGameStore((s) => s.ruleConfig);
 
   const round = (playerState?.round ?? 0) + 1;
   const preNightHint = (playerState as any)?.preNightHint ?? null;
+  const fallbackTime = ruleConfig?.skillActivationTimeout || 15;
 
   return (
     <div className="flex-1 flex items-center justify-center p-4 bg-night-phase">
@@ -445,8 +541,50 @@ const PreNightWait: React.FC = () => {
           </div>
         )}
         <div className="w-48 mx-auto">
-          <CountdownTimer seconds={5} />
+          <CountdownTimer seconds={phaseTimeRemaining > 0 ? phaseTimeRemaining : fallbackTime} />
         </div>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// 投票前等待面板（Bug 4+6 修复）
+// 所有发言结束后、投票开始前的等待阶段
+// 骑士可以在此阶段发动决斗
+// ============================================================================
+
+const PreVoteWaitPanel: React.FC = () => {
+  const playerState = useGameStore((s) => s.playerState);
+  const phaseTimeRemaining = useGameStore((s) => s.phaseTimeRemaining);
+  const ruleConfig = useGameStore((s) => s.ruleConfig);
+
+  if (!playerState) return null;
+
+  const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
+  const isKnight = myPlayer?.role === 'knight' && myPlayer?.status === 'alive';
+
+  const waitTime = ruleConfig?.preVoteWaitTime || 10;
+  const countdown = phaseTimeRemaining > 0 ? phaseTimeRemaining : waitTime;
+
+  return (
+    <div className="flex-1 flex items-center justify-center p-4">
+      <div className="card max-w-md w-full text-center space-y-4 animate-fade-in-up">
+        <div className="text-4xl">⏳</div>
+        <h2 className="text-xl font-bold text-amber-300">
+          发言结束，即将进入投票
+        </h2>
+        <p className="text-sm text-gray-400">
+          {isKnight ? '你是骑士，可以发动决斗！' : '等待投票开始...'}
+        </p>
+
+        {/* 倒计时 */}
+        <div className="w-48 mx-auto">
+          <CountdownTimer seconds={countdown} urgentThreshold={3} />
+        </div>
+
+        {/* 骑士决斗按钮 */}
+        {isKnight && <Suspense fallback={null}><KnightDuel /></Suspense>}
       </div>
     </div>
   );

@@ -8,6 +8,24 @@ const IdiotReveal: React.FC = () => {
   const [showReveal, setShowReveal] = useState(false);
   const [animPhase, setAnimPhase] = useState<'idle' | 'flipping' | 'revealed'>('idle');
 
+  // 触发翻牌动画
+  useEffect(() => {
+    if (!playerState) return;
+    const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
+    if (!myPlayer || myPlayer.role !== 'idiot') return;
+    const isRevealed = myPlayer.idiotRevealed === true;
+    if (isRevealed && animPhase === 'idle') {
+      setShowReveal(true);
+      setAnimPhase('flipping');
+
+      const flipTimer = setTimeout(() => {
+        setAnimPhase('revealed');
+      }, 700);
+
+      return () => clearTimeout(flipTimer);
+    }
+  }, [playerState, animPhase]);
+
   if (!playerState) return null;
 
   const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
@@ -19,20 +37,6 @@ const IdiotReveal: React.FC = () => {
   // 只在翻牌时显示动画，翻牌完成后不再显示此组件
   // 如果还没翻牌，不显示
   if (!isRevealed) return null;
-
-  // 触发翻牌动画
-  useEffect(() => {
-    if (isRevealed && animPhase === 'idle') {
-      setShowReveal(true);
-      setAnimPhase('flipping');
-
-      const flipTimer = setTimeout(() => {
-        setAnimPhase('revealed');
-      }, 700);
-
-      return () => clearTimeout(flipTimer);
-    }
-  }, [isRevealed, animPhase]);
 
   const handleClose = () => {
     setShowReveal(false);

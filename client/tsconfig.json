@@ -16,7 +16,8 @@
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,
     "paths": {
-      "@langrensha/shared": ["../shared"]
+      "@langrensha/shared": ["../shared"],
+      "@langrensha/shared/*": ["../shared/*"]
     }
   },
   "include": ["src"],
