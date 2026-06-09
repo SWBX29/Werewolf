@@ -10,6 +10,9 @@ const KnightDuel: React.FC = () => {
   const knightDuelResult = useGameStore((s) => s.knightDuelResult);
   const knightDuel = useGameStore((s) => s.knightDuel);
   const dismissKnightDuelResult = useGameStore((s) => s.dismissKnightDuelResult);
+  // Bug 63 修复：添加 isActionLocked 检查，防止重复决斗
+  const isActionLocked = useGameStore((s) => s.isActionLocked);
+  const setActionLocked = useGameStore((s) => s.setActionLocked);
 
   const [showTargetSelect, setShowTargetSelect] = useState(false);
   const [selectedSeat, setSelectedSeat] = useState<number | null>(null);
@@ -20,12 +23,16 @@ const KnightDuel: React.FC = () => {
   const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
   if (!myPlayer || myPlayer.role !== 'knight') return null;
 
-  // 只在白天发言阶段（DAY_SPEECH）且自己发言回合时才显示
-  if (playerState.phase !== 'DAY_SPEECH') return null;
+  // Bug 6 修复：在白天发言阶段（DAY_SPEECH）或投票前等待阶段（PRE_VOTE_WAIT）都可以发动决斗
+  if (playerState.phase !== 'DAY_SPEECH' && playerState.phase !== 'PRE_VOTE_WAIT') return null;
 
   const { speechOrder, currentSpeakerIndex, players } = playerState;
   const currentSpeakerSeat = speechOrder[currentSpeakerIndex] ?? null;
-  const isMyTurn = currentSpeakerSeat === myPlayer.seatNumber;
+  // 在 PRE_VOTE_WAIT 阶段，任何存活的骑士都可以发动决斗
+  // 在 DAY_SPEECH 阶段，只有当前发言者（骑士）才能发动决斗
+  const isMyTurn = playerState.phase === 'PRE_VOTE_WAIT'
+    ? (myPlayer.status === 'alive')
+    : (currentSpeakerSeat === myPlayer.seatNumber);
 
   if (!isMyTurn) return null;
 
@@ -42,16 +49,21 @@ const KnightDuel: React.FC = () => {
   };
 
   const handleStartDuel = () => {
+    // Bug 63 修复：检查是否已锁定
+    if (isActionLocked) return;
     setShowTargetSelect(true);
   };
 
   const handleTargetConfirm = () => {
-    if (selectedSeat === null) return;
+    // Bug 63 修复：检查是否已锁定和目标有效性
+    if (selectedSeat === null || isActionLocked) return;
     setShowConfirm(true);
   };
 
   const handleConfirmDuel = () => {
-    if (selectedSeat === null) return;
+    // Bug 63 修复：检查目标有效性并先锁定状态
+    if (selectedSeat === null || isActionLocked) return;
+    setActionLocked(true);
     knightDuel(selectedSeat);
     setShowConfirm(false);
     setShowTargetSelect(false);

@@ -14,7 +14,7 @@
  * ============================================================================
  */
 
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { useGameStore, getWsUrl } from '../useGameStore';
 import type {
   RoleId,
@@ -77,6 +77,9 @@ const HomeView: React.FC = () => {
   const [createNickname, setCreateNickname] = useState('');
   const [createGameMode, setCreateGameMode] = useState<GameMode>('HUMAN');
 
+  // Bug 4 修复：使用 ref 防止重复点击和追踪连接等待状态
+  const isConnectingRef = useRef(false);
+
   // Zustand store
   const {
     createRoom,
@@ -87,41 +90,73 @@ const HomeView: React.FC = () => {
     roomCode,
     inviteLink,
     qrCodeDataUrl,
-    error,
-    dismissError,
     setError,
     connect,
   } = useGameStore();
 
+  // Bug 4 修复：等待 WebSocket 连接建立的辅助函数
+  const waitForConnection = (): Promise<void> => {
+    return new Promise((resolve) => {
+      if (useGameStore.getState().isConnected) {
+        resolve();
+        return;
+      }
+      
+      // 防止重复连接
+      if (!isConnectingRef.current) {
+        isConnectingRef.current = true;
+        connect(getWsUrl());
+      }
+      
+      // 轮询检查连接状态（最多等待 10 秒）
+      let attempts = 0;
+      const maxAttempts = 100; // 100 * 100ms = 10s
+      const checkInterval = setInterval(() => {
+        attempts++;
+        if (useGameStore.getState().isConnected) {
+          clearInterval(checkInterval);
+          isConnectingRef.current = false;
+          resolve();
+        } else if (attempts >= maxAttempts) {
+          clearInterval(checkInterval);
+          isConnectingRef.current = false;
+          setError('连接服务器超时，请检查网络后重试');
+          resolve(); // 仍然 resolve，但会显示错误
+        }
+      }, 100);
+    });
+  };
+
   // ---- 加入房间 ----
-  const handleJoin = () => {
+  const handleJoin = async () => {
     if (!joinNickname.trim()) return;
     if (!joinRoomCode.trim()) return;
 
-    // 确保 WebSocket 已连接
-    if (!useGameStore.getState().isConnected) {
-      connect(getWsUrl());
-      // 等待连接建立后再发送消息
-      setTimeout(() => {
-        joinRoom(joinNickname.trim(), joinRoomCode.trim().toUpperCase());
-      }, 500);
-    } else {
+    // Bug 4 修复：等待连接建立后再发送消息
+    await waitForConnection();
+    if (useGameStore.getState().isConnected) {
       joinRoom(joinNickname.trim(), joinRoomCode.trim().toUpperCase());
     }
   };
 
   // ---- 创建房间 ----
-  const handleCreate = () => {
+  const handleCreate = async () => {
     if (!createNickname.trim()) return;
 
-    if (!useGameStore.getState().isConnected) {
-      connect(getWsUrl());
-      setTimeout(() => {
-        createRoom(createNickname.trim(), createGameMode, ruleConfig);
-      }, 500);
-    } else {
+    // Bug 4 修复：等待连接建立后再发送消息
+    await waitForConnection();
+    if (useGameStore.getState().isConnected) {
       createRoom(createNickname.trim(), createGameMode, ruleConfig);
     }
+  };
+
+  // ---- 阵营人数统计 ----
+  const getFactionCounts = () => {
+    const evilRoles = ROLE_ITEMS.filter(r => r.faction === 'evil');
+    const goodRoles = ROLE_ITEMS.filter(r => r.faction === 'good');
+    const evilCount = evilRoles.reduce((sum, r) => sum + (ruleConfig.roleDistribution[r.id] || 0), 0);
+    const goodCount = goodRoles.reduce((sum, r) => sum + (ruleConfig.roleDistribution[r.id] || 0), 0);
+    return { evilCount, goodCount };
   };
 
   // ---- 角色数量调整 ----
@@ -130,8 +165,20 @@ const HomeView: React.FC = () => {
     const newVal = Math.max(0, current + delta);
     const newDistribution = { ...ruleConfig.roleDistribution, [roleId]: newVal };
 
-    // 计算总人数
+    // 计算总人数，限制在6-18之间
     const total = Object.values(newDistribution).reduce((sum, c) => sum + (c || 0), 0);
+    if (total > 18 || total < 6) return;
+
+    // 阵营最低人数限制：至少1个狼人、3个好人
+    const roleItem = ROLE_ITEMS.find(r => r.id === roleId);
+    if (roleItem) {
+      const evilRoles = ROLE_ITEMS.filter(r => r.faction === 'evil');
+      const goodRoles = ROLE_ITEMS.filter(r => r.faction === 'good');
+      const evilCount = evilRoles.reduce((sum, r) => sum + (newDistribution[r.id] || 0), 0);
+      const goodCount = goodRoles.reduce((sum, r) => sum + (newDistribution[r.id] || 0), 0);
+      if (evilCount < 1 || goodCount < 3) return;
+    }
+
     updateRuleConfig({ roleDistribution: newDistribution, playerCount: total });
   };
 
@@ -156,13 +203,7 @@ const HomeView: React.FC = () => {
         <p className="text-gray-400">联机版 · 动态村规引擎</p>
       </div>
 
-      {/* 错误提示 */}
-      {error && (
-        <div className="card border-red-700 mb-4 flex items-center gap-2 max-w-md w-full">
-          <span className="text-red-400">{error}</span>
-          <button onClick={dismissError} className="ml-auto text-gray-500 hover:text-gray-300">x</button>
-        </div>
-      )}
+      {/* 错误提示由 App.tsx 全局统一展示，此处不再重复渲染 */}
 
       {/* 房间已创建提示（仅创建房间时显示，加入房间不会设置 inviteLink） */}
       {roomCode && inviteLink && (
@@ -282,7 +323,9 @@ const HomeView: React.FC = () => {
           {/* 角色池配置 */}
           <div className="space-y-2">
             <h3 className="text-lg font-medium">角色配置</h3>
-            <p className="text-sm text-gray-400">当前总人数：{ruleConfig.playerCount}</p>
+            <p className={`text-sm ${ruleConfig.playerCount < 6 || ruleConfig.playerCount > 18 || getFactionCounts().evilCount < 1 || getFactionCounts().goodCount < 3 ? 'text-red-400' : 'text-gray-400'}`}>
+              当前总人数：{ruleConfig.playerCount}（需6-18人）| 狼人：{getFactionCounts().evilCount}（至少1）| 好人：{getFactionCounts().goodCount}（至少3）
+            </p>
             <div className="grid grid-cols-2 gap-2">
               {ROLE_ITEMS.map((role) => {
                 const count = ruleConfig.roleDistribution[role.id] || 0;
@@ -304,7 +347,7 @@ const HomeView: React.FC = () => {
                     <div className="flex items-center gap-1">
                       <button
                         onClick={() => adjustRole(role.id, -1)}
-                        disabled={count <= 0}
+                        disabled={count <= 0 || ruleConfig.playerCount <= 6 || (role.faction === 'evil' && getFactionCounts().evilCount <= 1) || (role.faction === 'good' && getFactionCounts().goodCount <= 3)}
                         className="w-7 h-7 rounded bg-night-700 hover:bg-night-600 disabled:opacity-30 text-sm"
                       >
                         -
@@ -312,7 +355,8 @@ const HomeView: React.FC = () => {
                       <span className="w-6 text-center text-sm font-mono">{count}</span>
                       <button
                         onClick={() => adjustRole(role.id, 1)}
-                        className="w-7 h-7 rounded bg-night-700 hover:bg-night-600 text-sm"
+                        disabled={ruleConfig.playerCount >= 18}
+                        className="w-7 h-7 rounded bg-night-700 hover:bg-night-600 disabled:opacity-30 text-sm"
                       >
                         +
                       </button>
@@ -427,6 +471,44 @@ const HomeView: React.FC = () => {
                 className="accent-wolf-500 w-4 h-4"
               />
             </div>
+
+            {/* 女巫同晚双药 */}
+            <div className="flex items-center justify-between">
+              <span className="text-sm">女巫同晚双药</span>
+              <input
+                type="checkbox"
+                checked={ruleConfig.witchCanUseBothPotions}
+                onChange={(e) => updateRuleConfig({ witchCanUseBothPotions: e.target.checked })}
+                className="accent-wolf-500 w-4 h-4"
+              />
+            </div>
+
+            {/* 警长选举 */}
+            <div className="flex items-center justify-between">
+              <span className="text-sm">启用警长选举</span>
+              <input
+                type="checkbox"
+                checked={ruleConfig.sheriffElectionEnabled}
+                onChange={(e) => updateRuleConfig({ sheriffElectionEnabled: e.target.checked })}
+                className="accent-wolf-500 w-4 h-4"
+              />
+            </div>
+
+            {/* 警长投票权重 */}
+            {ruleConfig.sheriffElectionEnabled && (
+              <div className="flex items-center justify-between">
+                <span className="text-sm">警长投票权重</span>
+                <select
+                  value={ruleConfig.sheriffVoteWeight}
+                  onChange={(e) => updateRuleConfig({ sheriffVoteWeight: Number(e.target.value) as 1 | 1.5 | 2 })}
+                  className="bg-gray-800 text-sm rounded px-2 py-1 border border-gray-600"
+                >
+                  <option value={1}>1票</option>
+                  <option value={1.5}>1.5票</option>
+                  <option value={2}>2票</option>
+                </select>
+              </div>
+            )}
 
             {/* 骑士决斗狼王 */}
             <div className="flex items-center justify-between">
@@ -641,7 +723,7 @@ const HomeView: React.FC = () => {
           {/* 创建按钮 */}
           <button
             onClick={handleCreate}
-            disabled={!createNickname.trim() || ruleConfig.playerCount < 6}
+            disabled={!createNickname.trim() || ruleConfig.playerCount < 6 || ruleConfig.playerCount > 18 || getFactionCounts().evilCount < 1 || getFactionCounts().goodCount < 3}
             className="btn-primary w-full text-lg"
           >
             创建房间（{ruleConfig.playerCount}人局）

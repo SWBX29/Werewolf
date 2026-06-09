@@ -8,6 +8,7 @@ const AppealButton: React.FC = () => {
   const sendMessage = useGameStore((s) => s.sendMessage);
 
   const [isExpanded, setIsExpanded] = useState(false);
+  const [arbitrationVoted, setArbitrationVoted] = useState(false);
 
   if (!appealEvent && !showArbitration) return null;
 
@@ -21,12 +22,13 @@ const AppealButton: React.FC = () => {
   };
 
   const handleArbitrationVote = (support: boolean) => {
-    if (!arbitrationEvent) return;
+    if (!arbitrationEvent || arbitrationVoted) return;
     sendMessage({
       type: 'ARBITRATION_VOTE',
       eventId: arbitrationEvent.eventId,
       support,
     });
+    setArbitrationVoted(true);
   };
 
   return (
@@ -76,14 +78,18 @@ const AppealButton: React.FC = () => {
         <div className="fixed bottom-6 right-6 z-40 w-80 card space-y-3 animate-slide-in-right">
           <h4 className="text-sm font-bold text-amber-400">仲裁投票</h4>
           <p className="text-sm text-gray-300">{arbitrationEvent.description}</p>
-          <div className="flex gap-2">
-            <button className="btn-secondary flex-1 text-sm" onClick={() => handleArbitrationVote(true)}>支持法官</button>
-            <button className="btn-danger flex-1 text-sm" onClick={() => handleArbitrationVote(false)}>驳回法官</button>
-          </div>
+          {arbitrationVoted ? (
+            <p className="text-sm text-green-400 text-center py-2">✓ 已投票，等待结果</p>
+          ) : (
+            <div className="flex gap-2">
+              <button className="btn-secondary flex-1 text-sm" onClick={() => handleArbitrationVote(true)}>支持法官</button>
+              <button className="btn-danger flex-1 text-sm" onClick={() => handleArbitrationVote(false)}>驳回法官</button>
+            </div>
+          )}
         </div>
       )}
     </>
   );
 };
 
-export default AppealButton;
+export default React.memo(AppealButton);

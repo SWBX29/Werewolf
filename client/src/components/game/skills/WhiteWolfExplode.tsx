@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import TargetSelector from '../TargetSelector';
 
@@ -11,6 +11,19 @@ const WhiteWolfExplode: React.FC = () => {
   const [selectedSeat, setSelectedSeat] = useState<number | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
   const [exploded, setExploded] = useState(false);
+  // Bug 11 修复：添加服务端确认状态跟踪
+  const [pendingExplode, setPendingExplode] = useState(false);
+
+  // Bug 11 修复：当服务端确认后（玩家状态变为非存活），才设置 exploded
+  useEffect(() => {
+    if (!playerState) return;
+    const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
+    if (!myPlayer || myPlayer.role !== 'white_wolf_king') return;
+    if (pendingExplode && myPlayer.status !== 'alive') {
+      setExploded(true);
+      setPendingExplode(false);
+    }
+  }, [playerState, pendingExplode]);
 
   if (!playerState) return null;
 
@@ -18,13 +31,25 @@ const WhiteWolfExplode: React.FC = () => {
   if (!myPlayer || myPlayer.role !== 'white_wolf_king') return null;
 
   // 白狼王已死亡或已自爆则不再显示
-  if (myPlayer.status !== 'alive') return null;
+  // 但如果正在等待服务端确认，显示等待指示
+  if (myPlayer.status !== 'alive') {
+    if (pendingExplode) {
+      return (
+        <div className="p-4 text-center space-y-2">
+          <p className="text-red-400 font-semibold animate-pulse">🐺 自爆确认中...</p>
+          <p className="text-xs text-gray-500">等待服务端处理</p>
+        </div>
+      );
+    }
+    return null;
+  }
 
   // 只在白天发言/投票阶段可自爆
   const canExplode =
-    (playerState.phase === 'DAY_SPEECH' || playerState.phase === 'DAY_VOTE') &&
+    (playerState.phase === 'DAY_SPEECH' || playerState.phase === 'PRE_VOTE_WAIT' || playerState.phase === 'DAY_VOTE') &&
     !isActionLocked &&
-    !exploded;
+    !exploded &&
+    !pendingExplode;
 
   if (!canExplode && !showTargetSelect && !showConfirm) return null;
 
@@ -52,11 +77,12 @@ const WhiteWolfExplode: React.FC = () => {
 
   const handleConfirmExplode = () => {
     if (selectedSeat === null) return;
+    // Bug 11 修复：先设置 pending 状态，等服务端确认后再设置 exploded
+    setPendingExplode(true);
     whiteWolfExplode(selectedSeat);
     setShowConfirm(false);
     setShowTargetSelect(false);
     setSelectedSeat(null);
-    setExploded(true);
   };
 
   const cancelAll = () => {
@@ -67,6 +93,13 @@ const WhiteWolfExplode: React.FC = () => {
 
   return (
     <>
+      {/* 等待服务端确认 */}
+      {pendingExplode && (
+        <div className="p-3 text-center bg-red-950/20 rounded-lg border border-red-800/30 animate-pulse">
+          <p className="text-sm text-red-300">🐺 自爆确认中，等待服务端处理...</p>
+        </div>
+      )}
+
       {/* 自爆按钮 */}
       {!showTargetSelect && !showConfirm && canExplode && (
         <div className="space-y-2">

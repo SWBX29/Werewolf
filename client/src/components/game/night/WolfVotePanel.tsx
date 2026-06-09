@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import TargetSelector from '../TargetSelector';
 import WolfChat from './WolfChat';
+import ConfirmDialog from '../ConfirmDialog';
+import { MyActionInfo } from './NightWaiting';
 
 /**
  * 狼人投票面板 — 共同睁眼的狼人选择击杀目标
@@ -17,11 +19,21 @@ export default function WolfVotePanel() {
   const mySeat = myPlayer?.seatNumber ?? 0;
   const wolfVotes = playerState?.wolfVotes ?? {};
   const wolfVoteConsensus = playerState?.wolfVoteConsensus ?? false;
+  // 自己已提交的夜间行动（如噩梦之影在噩梦阶段已提交的恐惧）
+  const myNightAction = playerState?.myNightAction ?? null;
 
   // 已投票时初始化为当前投票目标，方便修改
   const myCurrentVote = wolfVotes[mySeat] ?? null;
-  const [selected, setSelected] = useState<number | null>(myCurrentVote);
-  const [hasVoted, setHasVoted] = useState(myCurrentVote !== null);
+  const [selected, setSelected] = useState<number | null>(null);
+  const [hasVoted, setHasVoted] = useState(false);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  // Bug 3 修复：使用 useEffect 同步投票状态，处理重连场景
+  useEffect(() => {
+    // 同步服务端的投票状态到本地
+    setSelected(myCurrentVote);
+    setHasVoted(myCurrentVote !== null);
+  }, [myCurrentVote]);
 
   if (!nightActionRequest) return null;
 
@@ -29,10 +41,16 @@ export default function WolfVotePanel() {
   const totalWolves = Object.keys(wolfVotes || {}).length || 1;
   const votedCount = Object.values(wolfVotes || {}).filter((v) => v !== undefined).length;
 
-  const handleConfirm = () => {
+  const handleConfirmClick = () => {
+    if (selected === null) return;
+    setConfirmOpen(true);
+  };
+
+  const handleConfirmAction = () => {
     if (selected === null) return;
     sendWolfVote(selected);
     setHasVoted(true);
+    setConfirmOpen(false);
   };
 
   const handleChangeVote = () => {
@@ -51,6 +69,28 @@ export default function WolfVotePanel() {
       <p className="text-sm text-gray-400 mb-4">
         与同伴商议后选择今晚的击杀目标。可选择自刀。倒计时结束前可修改投票。
       </p>
+
+      {/* 同伴列表 */}
+      {nightActionRequest.wolfAllies && nightActionRequest.wolfAllies.length > 0 && (
+        <div className="mb-4 p-3 rounded-lg bg-red-950/20 border border-red-900/30">
+          <h3 className="text-xs font-semibold text-red-400 mb-2">🐺 你的同伴</h3>
+          <div className="flex flex-wrap gap-2">
+            {nightActionRequest.wolfAllies.map((ally) => (
+              <span
+                key={ally.seatNumber}
+                className={`text-xs px-2 py-1 rounded ${
+                  ally.seatNumber === mySeat
+                    ? 'bg-yellow-900/30 text-yellow-400 border border-yellow-700/50'
+                    : 'bg-red-900/30 text-red-300 border border-red-700/50'
+                }`}
+              >
+                {ally.seatNumber}号 {ally.nickname}
+                {ally.seatNumber === mySeat && '（你）'}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* 目标选择 — 已投票但想修改时也可操作 */}
       <TargetSelector
@@ -111,7 +151,7 @@ export default function WolfVotePanel() {
         <button
           className="btn-primary"
           disabled={selected === null || wolfVoteConsensus}
-          onClick={handleConfirm}
+          onClick={handleConfirmClick}
         >
           {hasVoted ? '重新投票' : '确认投票'}
         </button>
@@ -119,6 +159,21 @@ export default function WolfVotePanel() {
 
       {/* 狼人聊天 */}
       <WolfChat />
+
+      {/* 已行动的噩梦恐惧信息（噩梦之影在狼人投票阶段可见自己之前的恐惧选择） */}
+      {myNightAction && myNightAction.roleId !== 'werewolf' && (
+        <MyActionInfo action={myNightAction} />
+      )}
+
+      {/* 二次确认弹窗 */}
+      <ConfirmDialog
+        open={confirmOpen}
+        title="确认投票"
+        message={`确定要投票击杀 ${selected}号 玩家吗？`}
+        confirmLabel="确认投票"
+        onConfirm={handleConfirmAction}
+        onCancel={() => setConfirmOpen(false)}
+      />
     </div>
   );
 }

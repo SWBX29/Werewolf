@@ -74,6 +74,7 @@ const PlayerSubSchema = new Schema<Player>({
     default: 'alive',
   },
   isJudge: { type: Boolean, required: true, default: false },
+  isSheriff: { type: Boolean, required: true, default: false },
   isHost: { type: Boolean, required: true, default: false },
   isReady: { type: Boolean, required: true, default: false },
   isNightmared: { type: Boolean, required: true, default: false },
@@ -236,6 +237,7 @@ const RuleConfigSubSchema = new Schema<RuleConfig>({
     enum: ['DEATH', 'ALIVE'],
   },
   poisonBlockGun: { type: Boolean, required: true },
+  witchCanUseBothPotions: { type: Boolean, required: true, default: false },
   knightDuelWolfKing: {
     type: String,
     required: true,
@@ -295,14 +297,20 @@ const RuleConfigSubSchema = new Schema<RuleConfig>({
   nightActionTimeout: { type: Number, required: true, min: 0, default: 30 },
   speechTimeout: { type: Number, required: true, min: 0, default: 60 },
   voteTimeout: { type: Number, required: true, min: 0, default: 20 },
+  preVoteWaitTime: { type: Number, required: true, min: 0, default: 10 },
+  skillActivationTimeout: { type: Number, required: true, min: 0, default: 15 },
 
   // ---- 身份揭示配置（规则20） ----
   revealIdentityOnDayVote: {
     type: String,
     required: true,
     enum: ['NONE', 'FACTION', 'ROLE'],
-    default: 'FACTION',
+    default: 'NONE',
   },
+
+  // ---- 警长选举 ----
+  sheriffElectionEnabled: { type: Boolean, required: true, default: false },
+  sheriffVoteWeight: { type: Number, required: true, default: 1.5, enum: [1, 1.5, 2] },
 }, { _id: false, strict: 'throw' });
 
 /**
@@ -338,6 +346,8 @@ export interface RoomDocument extends Document {
   speechOrder: number[];
   currentSpeakerIndex: number;
   votes: Map<number, number>;
+  sheriffElectionVotes: Map<number, number>;
+  pkCandidates: number[];
   nightActions: Map<string, NightActionData>;
   werewolfTarget: number | null;
   witchSaveTarget: number | null;
@@ -375,8 +385,9 @@ const RoomSchema = new Schema<RoomDocument>({
     type: String,
     required: true,
     enum: [
-      'LOBBY', 'NIGHT', 'NIGHT_SETTLEMENT', 'DAY_ANNOUNCE',
-      'DAY_SPEECH', 'DAY_VOTE', 'DAY_SETTLEMENT', 'DAY_INTERRUPT',
+      'LOBBY', 'ROLE_REVEAL', 'PRE_NIGHT', 'NIGHT', 'NIGHT_SETTLEMENT', 'DAY_ANNOUNCE',
+      'SHERIFF_ELECTION', 'SHERIFF_TRANSFER',
+      'DAY_SPEECH', 'PRE_VOTE_WAIT', 'DAY_VOTE', 'DAY_SETTLEMENT', 'DAY_INTERRUPT',
       'PK_VOTE', 'GAME_OVER',
     ],
     default: 'LOBBY',
@@ -388,6 +399,8 @@ const RoomSchema = new Schema<RoomDocument>({
   speechOrder: { type: [Number], default: [] },
   currentSpeakerIndex: { type: Number, default: 0 },
   votes: { type: Map, of: Number, default: {} },
+  sheriffElectionVotes: { type: Map, of: Number, default: {} },
+  pkCandidates: { type: [Number], default: [] },
   nightActions: { type: Map, of: NightActionDataSubSchema, default: {} },
   werewolfTarget: { type: Number, default: null },
   witchSaveTarget: { type: Number, default: null },
@@ -458,9 +471,10 @@ const GameLogSchema = new Schema<GameLogDocument>({
   },
   gameId: {
     type: String,
-    required: true,
+    required: false,
     uppercase: true,
     trim: true,
+    default: '',
   },
   timestamp: { type: Number, required: true, default: () => Date.now() },
   actorSeat: { type: Number, required: true, min: 0 },
@@ -476,10 +490,13 @@ const GameLogSchema = new Schema<GameLogDocument>({
       'NIGHT_SETTLEMENT', 'NIGHTMARE_DEFER', 'NIGHTMARE_BLOCK_MODE_DOWNGRADE',
       'WOLF_CHAT_MESSAGE', 'WOLF_VOTE_CAST', 'WOLF_VOTE_CONSENSUS', 'WOLF_VOTE_TIMEOUT_RANDOM',
       // 白天操作
-      'DAY_ANNOUNCE', 'SPEECH_START', 'SPEECH_CONTENT', 'SPEECH_SKIP',
+      'DAY_ANNOUNCE', 'SPEECH_START', 'SPEECH_CONTENT', 'SPEECH_SKIP', 'SPEECH_FINISH',
       'VOTE_CAST', 'VOTE_RESULT', 'PK_VOTE_START',
       // 特殊技能
       'KNIGHT_DUEL', 'WHITE_WOLF_EXPLODE', 'HUNTER_GUN', 'WOLF_KING_GUN', 'IDIOT_REVEAL',
+      // 警长选举
+      'SHERIFF_ELECTION_START', 'SHERIFF_ELECTION_VOTE', 'SHERIFF_ELECTED', 'SHERIFF_ELECTION_TIE',
+      'SHERIFF_TRANSFER',
       // 法官操作
       'JUDGE_OVERRIDE_SETTLEMENT', 'JUDGE_FORCE_NEXT_PHASE',
       'JUDGE_PAUSE', 'JUDGE_RESUME', 'JUDGE_MODIFY_SPEECH_ORDER',
@@ -487,6 +504,10 @@ const GameLogSchema = new Schema<GameLogDocument>({
       'JUDGE_TRIGGER_WHITE_WOLF', 'JUDGE_SKIP_SPEECH',
       // 系统
       'GAME_OVER', 'PHASE_CHANGE', 'TIMER_EXPIRED',
+      // V10 新增
+      'WOLF_PHASE_SKIPPED', 'GUARD_NO_VALID_TARGET',
+      'MECHANICAL_WOLF_SKILL_DEFERRED', 'DEAD_CHAT_MESSAGE',
+      'DAY_VOTE_IDENTITY_REVEAL',
     ],
   },
   targetSeat: { type: Number, default: null },
@@ -496,7 +517,8 @@ const GameLogSchema = new Schema<GameLogDocument>({
     required: true,
     enum: [
       'LOBBY', 'NIGHT', 'NIGHT_SETTLEMENT', 'DAY_ANNOUNCE',
-      'DAY_SPEECH', 'DAY_VOTE', 'DAY_SETTLEMENT', 'DAY_INTERRUPT',
+      'SHERIFF_ELECTION', 'SHERIFF_TRANSFER',
+      'DAY_SPEECH', 'PRE_VOTE_WAIT', 'DAY_VOTE', 'DAY_SETTLEMENT', 'DAY_INTERRUPT',
       'PK_VOTE', 'GAME_OVER',
     ],
   },
@@ -506,9 +528,11 @@ const GameLogSchema = new Schema<GameLogDocument>({
   overrideReason: { type: String, default: null },
   nightActionOrderSnapshot: {
     type: [String],
-    required: true,
+    required: false,
+    default: [],
     validate: {
       validator(v: string[]) {
+        if (!v || v.length === 0) return true;
         const validRoles = new Set([
           'villager', 'seer', 'witch', 'hunter', 'guard', 'idiot', 'knight',
           'werewolf', 'white_wolf_king', 'wolf_king', 'nightmare_shadow', 'hidden_wolf', 'mechanical_wolf',

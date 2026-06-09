@@ -9,14 +9,15 @@ const DeadChat: React.FC = () => {
   const [inputValue, setInputValue] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // React Hooks 必须在所有条件返回之前调用
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [deadChatMessages]);
+
   // 只有在观战模式（死亡状态）下才显示
   if (!playerState) return null;
   const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
   if (!myPlayer || myPlayer.status === 'alive') return null;
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [deadChatMessages]);
 
   const handleSend = () => {
     const trimmed = inputValue.trim();

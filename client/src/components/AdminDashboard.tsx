@@ -12,7 +12,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { useGameStore } from '../useGameStore';
+import { useGameStore, getWsUrl } from '../useGameStore';
 import type { ActionLogDTO, GamePhase, ActionType } from '@langrensha/shared';
 import { ROLE_META } from '@langrensha/shared';
 
@@ -35,6 +35,7 @@ const ACTION_TYPE_NAMES: Record<ActionType, string> = {
   SPEECH_START: '发言开始',
   SPEECH_CONTENT: '发言内容',
   SPEECH_SKIP: '跳过发言',
+  SPEECH_FINISH: '主动结束发言',
   VOTE_CAST: '投票',
   VOTE_RESULT: '投票结果',
   PK_VOTE_START: 'PK投票',
@@ -64,18 +65,28 @@ const ACTION_TYPE_NAMES: Record<ActionType, string> = {
   MECHANICAL_WOLF_SKILL_DEFERRED: '机械狼技能延迟',
   DEAD_CHAT_MESSAGE: '死亡玩家聊天',
   DAY_VOTE_IDENTITY_REVEAL: '白天票出身份揭示',
+  SHERIFF_ELECTION_START: '警长选举开始',
+  SHERIFF_ELECTION_VOTE: '警长选举投票',
+  SHERIFF_ELECTED: '警长当选',
+  SHERIFF_ELECTION_TIE: '警长选举平票',
+  SHERIFF_TRANSFER: '警徽移交',
 };
 
 const PHASE_NAMES: Record<GamePhase, string> = {
   LOBBY: '大厅',
+  ROLE_REVEAL: '身份展示',
+  PRE_NIGHT: '入夜等待',
   NIGHT: '夜间',
   NIGHT_SETTLEMENT: '夜间结算',
   DAY_ANNOUNCE: '公布死讯',
   DAY_SPEECH: '发言',
+  PRE_VOTE_WAIT: '投票前等待',
   DAY_VOTE: '投票',
   DAY_SETTLEMENT: '白天结算',
   DAY_INTERRUPT: '中断',
   PK_VOTE: 'PK',
+  SHERIFF_ELECTION: '警长选举',
+  SHERIFF_TRANSFER: '警徽移交',
   GAME_OVER: '结束',
 };
 
@@ -99,6 +110,10 @@ const AdminDashboard: React.FC = () => {
   // 筛选条件
   const [filterRoomCode, setFilterRoomCode] = useState('');
   const [filterLimit, setFilterLimit] = useState(50);
+  const [filterActionTypes, setFilterActionTypes] = useState<ActionType[]>([]);
+  const [filterPhases, setFilterPhases] = useState<GamePhase[]>([]);
+  const [filterFromTime, setFilterFromTime] = useState<number | undefined>(undefined);
+  const [filterToTime, setFilterToTime] = useState<number | undefined>(undefined);
 
   // 密钥输入（本地状态，避免输入时组件消失）
   const [secretInput, setSecretInput] = useState(adminSecret);
@@ -106,12 +121,7 @@ const AdminDashboard: React.FC = () => {
   // 确保已连接
   useEffect(() => {
     if (!isConnected) {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url =
-        window.location.port === '5173' || window.location.hostname === 'localhost'
-          ? `${protocol}//localhost:3001`
-          : `${protocol}//${window.location.host}`;
-      connect(url);
+      connect(getWsUrl());
     }
   }, []);
 
@@ -120,9 +130,11 @@ const AdminDashboard: React.FC = () => {
     setAdminSecret(secretInput.trim());
     fetchAdminLogs(
       filterRoomCode.trim() || undefined,
-      undefined,
-      undefined,
+      filterFromTime,
+      filterToTime,
       filterLimit,
+      filterActionTypes,
+      filterPhases,
     );
   };
 
@@ -206,7 +218,7 @@ const AdminDashboard: React.FC = () => {
       {/* 筛选栏 — 仅鉴权后显示 */}
       {adminAuthSuccess && (
       <div className="card mb-4">
-        <div className="flex items-end gap-3">
+        <div className="flex items-end gap-3 mb-3">
           <div className="flex-1">
             <label className="text-xs text-gray-500">房间码</label>
             <input
@@ -235,7 +247,60 @@ const AdminDashboard: React.FC = () => {
             查询
           </button>
         </div>
-        <p className="text-xs text-gray-500 mt-2">
+        
+        <div className="flex items-end gap-3 mb-3">
+          <div className="flex-1">
+            <label className="text-xs text-gray-500">动作类型（多选）</label>
+            <select
+              multiple
+              value={filterActionTypes}
+              onChange={(e) => {
+                const options = Array.from(e.target.selectedOptions);
+                setFilterActionTypes(options.map((opt) => opt.value as ActionType));
+              }}
+              className="select-field w-full text-sm h-20"
+            >
+              {Object.entries(ACTION_TYPE_NAMES).map(([type, name]) => (
+                <option key={type} value={type}>{name}</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex-1">
+            <label className="text-xs text-gray-500">游戏阶段（多选）</label>
+            <select
+              multiple
+              value={filterPhases}
+              onChange={(e) => {
+                const options = Array.from(e.target.selectedOptions);
+                setFilterPhases(options.map((opt) => opt.value as GamePhase));
+              }}
+              className="select-field w-full text-sm h-20"
+            >
+              {Object.entries(PHASE_NAMES).map(([phase, name]) => (
+                <option key={phase} value={phase}>{name}</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex-1">
+            <label className="text-xs text-gray-500">时间范围</label>
+            <div className="flex gap-2">
+              <input
+                type="datetime-local"
+                value={filterFromTime ? new Date(filterFromTime).toISOString().slice(0, 16) : ''}
+                onChange={(e) => setFilterFromTime(e.target.value ? new Date(e.target.value).getTime() : undefined)}
+                className="input-field w-full text-sm"
+              />
+              <input
+                type="datetime-local"
+                value={filterToTime ? new Date(filterToTime).toISOString().slice(0, 16) : ''}
+                onChange={(e) => setFilterToTime(e.target.value ? new Date(e.target.value).getTime() : undefined)}
+                className="input-field w-full text-sm"
+              />
+            </div>
+          </div>
+        </div>
+
+        <p className="text-xs text-gray-500">
           共 {adminLogsTotal} 条记录，当前显示 {adminLogs.length} 条
         </p>
       </div>

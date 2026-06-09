@@ -86,7 +86,7 @@ export const ROLE_META: Record<RoleId, RoleMeta> = {
     id: 'guard',
     name: '守卫',
     faction: 'good',
-    description: '每晚可守护一名玩家（不可连续守同一人）',
+    description: '每晚可守护一名玩家（不可重复守护同一人）',
   },
   idiot: {
     id: 'idiot',
@@ -361,8 +361,20 @@ export interface RuleConfig {
   /** 投票超时时间（秒），0 表示无限等待 */
   voteTimeout: number;
 
+  /** 发言结束到投票开始之间的等待时间（秒），用于骑士发动技能等，默认 10 */
+  preVoteWaitTime: number;
+
+  /** 投票出局后技能发动等待时间（秒），用于猎人/狼王等角色发动技能，默认 15 */
+  skillActivationTimeout: number;
+
   /** 白天票出身份显示方式（规则20） */
   revealIdentityOnDayVote: RevealIdentityOnDayVote;
+
+  /** 是否启用警长选举 */
+  sheriffElectionEnabled: boolean;
+
+  /** 警长投票权重（1 / 1.5 / 2），默认 1.5 */
+  sheriffVoteWeight: 1 | 1.5 | 2;
 }
 
 /**
@@ -380,24 +392,31 @@ export type SpeechOrderStrategy = 'DEATH_LEFT' | 'DEATH_RIGHT' | 'SHERIFF_LEFT' 
  * 注意：这不是硬编码游戏数据，而是创建房间的初始模板
  * 法官在 UI 上修改后覆盖这些默认值
  */
-export function createDefaultRuleConfig(playerCount: number = 9): RuleConfig {
+export function createDefaultRuleConfig(playerCount: number = 12): RuleConfig {
   return {
     playerCount,
     roleDistribution: {
-      werewolf: 3,
+      villager: 1,
       seer: 1,
       witch: 1,
       hunter: 1,
       guard: 1,
-      villager: 2,
+      idiot: 1,
+      knight: 1,
+      werewolf: 1,
+      white_wolf_king: 0,
+      wolf_king: 1,
+      nightmare_shadow: 1,
+      hidden_wolf: 1,
+      mechanical_wolf: 1,
     },
     nightActionOrder: [...NIGHT_ACTION_ORDER_PRESETS.classic],
     nightActionOrderPreset: 'classic',
-    witchSaveSelf: 'FIRST_NIGHT',
-    witchCanUseBothPotions: false,
+    witchSaveSelf: 'ALWAYS',
+    witchCanUseBothPotions: true,
     guardWitchConflict: 'DEATH',
-    poisonBlockGun: true,
-    knightDuelWolfKing: 'SILENCED',
+    poisonBlockGun: false,
+    knightDuelWolfKing: 'CAN_SHOOT',
     knightDuelSuicide: 'SUICIDE',
     tieVoteResolution: 'PK_VOTE',
     winCondition: 'SLAUGHTER_SIDE',
@@ -408,7 +427,11 @@ export function createDefaultRuleConfig(playerCount: number = 9): RuleConfig {
     nightActionTimeout: 30,
     speechTimeout: 60,
     voteTimeout: 20,
-    revealIdentityOnDayVote: 'FACTION',
+    preVoteWaitTime: 10,
+    skillActivationTimeout: 15,
+    revealIdentityOnDayVote: 'NONE',
+    sheriffElectionEnabled: false,
+    sheriffVoteWeight: 1.5,
   };
 }
 
@@ -429,15 +452,41 @@ export function createDefaultRuleConfig(playerCount: number = 9): RuleConfig {
  */
 export type GamePhase =
   | 'LOBBY'             // 大厅等待
+  | 'ROLE_REVEAL'      // 角色展示环节
+  | 'PRE_NIGHT'         // 入夜前等待
   | 'NIGHT'             // 夜间行动（含子阶段）
   | 'NIGHT_SETTLEMENT'  // 夜间结算
   | 'DAY_ANNOUNCE'      // 白天公布死讯
+  | 'SHERIFF_ELECTION'   // 警长选举
+  | 'SHERIFF_TRANSFER'   // 警徽移交（警长死亡时）
   | 'DAY_SPEECH'        // 白天发言
+  | 'PRE_VOTE_WAIT'     // 发言结束→投票前等待（骑士可发动技能）
   | 'DAY_VOTE'          // 白天投票
   | 'DAY_SETTLEMENT'    // 白天结算
   | 'DAY_INTERRUPT'     // 白天中断（骑士决斗/白狼王自爆触发）
   | 'PK_VOTE'           // 平票PK投票
   | 'GAME_OVER';        // 游戏结束
+
+/**
+ * 游戏阶段中文名称映射（共享常量，供客户端各组件统一引用）
+ */
+export const PHASE_NAMES: Record<GamePhase, string> = {
+  LOBBY: '大厅等待',
+  ROLE_REVEAL: '身份展示',
+  PRE_NIGHT: '入夜等待',
+  NIGHT: '天黑请闭眼',
+  NIGHT_SETTLEMENT: '夜间结算中',
+  DAY_ANNOUNCE: '天亮了',
+  DAY_SPEECH: '发言阶段',
+  PRE_VOTE_WAIT: '投票前等待',
+  DAY_VOTE: '投票阶段',
+  DAY_SETTLEMENT: '白天结算中',
+  DAY_INTERRUPT: '白天中断',
+  PK_VOTE: 'PK投票',
+  SHERIFF_ELECTION: '警长选举',
+  SHERIFF_TRANSFER: '警徽移交',
+  GAME_OVER: '游戏结束',
+};
 
 /**
  * 夜间子阶段信息
@@ -478,8 +527,10 @@ export interface Player {
   role: RoleId;
   /** 存活状态 */
   status: PlayerStatus;
-  /** 是否为法官 */
+  /** 是否为法官（上帝/房主） */
   isJudge: boolean;
+  /** 是否为警长（选举产生的玩家角色） */
+  isSheriff: boolean;
   /** 是否为房主 */
   isHost: boolean;
   /** 是否已准备 */
@@ -536,6 +587,22 @@ export type DeathCause =
   | 'judge_override';     // 法官强制改判
 
 /**
+ * 死亡原因中文名称映射
+ */
+export const DEATH_CAUSE_NAMES: Record<DeathCause, string> = {
+  werewolf_kill: '狼杀',
+  witch_poison: '毒杀',
+  vote_out: '票出',
+  hunter_gun: '猎人开枪',
+  wolf_king_gun: '狼王开枪',
+  white_wolf_explode: '白狼王自爆',
+  knight_duel: '骑士决斗',
+  knight_suicide: '骑士自尽',
+  guard_witch_conflict: '同守同救',
+  judge_override: '法官改判',
+};
+
+/**
  * 房间完整状态（服务端内部使用）
  */
 export interface RoomState {
@@ -559,6 +626,10 @@ export interface RoomState {
   currentSpeakerIndex: number;
   /** 投票记录：key 为投票者座位号，value 为目标座位号 */
   votes: Record<number, number>;
+  /** 警长选举投票记录：key 为投票者座位号，value 为目标座位号 */
+  sheriffElectionVotes: Record<number, number>;
+  /** PK投票候选人座位号列表（仅 PK_VOTE 阶段有值） */
+  pkCandidates: number[];
   /** 夜间行动记录：key 为角色ID，value 为该角色当晚的行动数据 */
   nightActions: Record<string, NightActionData>;
   /** 当晚被狼人击杀的座位号 */
@@ -684,6 +755,7 @@ export interface PlayerDTO {
   seatNumber: number;
   status: PlayerStatus;
   isJudge: boolean;
+  isSheriff: boolean;
   isHost: boolean;
   isReady: boolean;
   isMuted: boolean;
@@ -709,6 +781,8 @@ export interface PlayerDTO {
   mechanicalWolfImitatedRole: RoleId | null;
   /** 机械狼专属：模仿技能是否被恐惧延迟（仅自己可见，规则13） */
   mechanicalWolfSkillDeferred: boolean | null;
+  /** 死亡原因（仅自己可见，用于技能组件判断如猎人/狼王被毒死时封印开枪） */
+  deathCause: DeathCause | null;
 }
 
 /**
@@ -720,6 +794,8 @@ export interface PlayerRoomStateDTO {
   gameMode: GameMode;
   phase: GamePhase;
   round: number;
+  /** 游戏配置人数（用于大厅阶段判断是否达到开赛人数） */
+  playerCount: number;
   /** 自己的玩家 ID，用于在玩家列表中定位自己 */
   myPlayerId: string;
   /** 脱敏后的玩家列表 */
@@ -748,6 +824,14 @@ export interface PlayerRoomStateDTO {
   winner: Faction | null;
   /** 女巫同一晚能否同时使用解药和毒药 */
   witchCanUseBothPotions: boolean;
+  /** PK投票候选人座位号列表（仅 PK_VOTE 阶段有值） */
+  pkCandidates: number[];
+  /** 警长投票权重 */
+  sheriffVoteWeight: 1 | 1.5 | 2;
+  /** 入夜前提示：是否有隐狼/机械狼代替原有狼人行动 */
+  preNightHint: string | null;
+  /** 自己当夜已提交的夜间行动（等待他人行动时可见） */
+  myNightAction: NightActionData | null;
 }
 
 /**
@@ -783,6 +867,8 @@ export interface JudgeRoomStateDTO {
   wolfVoteConsensus: boolean;
   /** 狼人聊天消息（法官可见全量） */
   wolfChatMessages: WolfChatMessage[];
+  /** 警长选举投票记录（法官可见全量） */
+  sheriffElectionVotes: Record<number, number>;
 }
 
 /**
@@ -797,6 +883,11 @@ export interface NightActionRequestDTO {
   timeout: number;
   /** 附加提示信息 */
   hint: string;
+  /**
+   * 是否因被噩梦之影恐惧而封印
+   * 为 true 时客户端应显示被恐惧提示，禁止操作，等待倒计时结束
+   */
+  isBlockedByNightmare: boolean;
   /**
    * 女巫专属：今晚被杀者座位号（如果女巫在守卫之后行动且能看到死讯）
    * 如果女巫在守卫之前行动，此值为 null（盲救）
@@ -817,6 +908,11 @@ export interface NightActionRequestDTO {
    */
   wolfVoteConsensus: boolean | null;
   /**
+   * 狼人子阶段专属：共同睁眼的狼人同伴列表
+   * 每项包含座位号和昵称，让狼人知道彼此身份
+   */
+  wolfAllies: Array<{ seatNumber: number; nickname: string }> | null;
+  /**
    * 被禁用的目标座位号列表（如已被守护过、已被恐惧过、不能自保等）
    */
   disabledTargets: number[];
@@ -824,6 +920,10 @@ export interface NightActionRequestDTO {
    * 被禁用目标的原因映射：key为座位号，value为禁用原因
    */
   disabledReasons: Record<number, string>;
+  /**
+   * 女巫专属：女巫自救规则（从服务端配置下发，确保客户端使用权威值）
+   */
+  witchSaveSelfRule?: 'NEVER' | 'FIRST_NIGHT' | 'ALWAYS';
 }
 
 // ============================================================================
@@ -846,6 +946,7 @@ export type ClientMessageType =
   | 'HUNTER_GUN'
   | 'WOLF_KING_GUN'
   | 'SPEECH'
+  | 'FINISH_SPEECH'
   | 'UPDATE_NIGHT_ORDER'
   | 'JUDGE_OVERRIDE_SETTLEMENT'
   | 'JUDGE_FORCE_NEXT_PHASE'
@@ -860,8 +961,13 @@ export type ClientMessageType =
   | 'DEAD_CHAT'
   | 'APPEAL'
   | 'ARBITRATION_VOTE'
+  | 'DISSOLVE_ROOM'
+  | 'RECONNECT'
   | 'ADMIN_FETCH_LOGS'
-  | 'ADMIN_CLEANUP_CONFIG';
+  | 'ADMIN_CLEANUP_CONFIG'
+  | 'SHERIFF_ELECTION_VOTE'
+  | 'SHERIFF_TRANSFER'
+  | 'PING';
 
 /**
  * 服务端 → 客户端 消息类型枚举
@@ -879,6 +985,10 @@ export type ServerMessageType =
   | 'HUNTER_GUN_RESULT'
   | 'WOLF_KING_GUN_RESULT'
   | 'IDIOT_REVEAL'
+  | 'SHERIFF_ELECTED'
+  | 'SHERIFF_ELECTION_TIE'
+  | 'SHERIFF_TRANSFER_REQUEST'
+  | 'SHERIFF_TRANSFER_RESULT'
   | 'GAME_OVER'
   | 'ERROR'
   | 'JUDGE_WARNING'
@@ -890,12 +1000,19 @@ export type ServerMessageType =
   | 'WOLF_VOTE_UPDATE'
   | 'WOLF_CHAT_HISTORY'
   | 'ADMIN_LOGS_RESULT'
+  | 'ADMIN_CLEANUP_RESULT'
   | 'WOLF_PHASE_SKIPPED'
   | 'DEAD_CHAT'
   | 'DAY_VOTE_REVEAL'
   | 'SPEECH_CONTENT'
   | 'APPEAL_EVENT'
-  | 'ARBITRATION_VOTE';
+  | 'ARBITRATION_VOTE'
+  | 'ROOM_DISSOLVED'
+  | 'RECONNECT_SUCCESS'
+  | 'JUDGE_ACTION'
+  | 'NIGHT_COUNTDOWN'
+  | 'SPEECH_COUNTDOWN'
+  | 'PONG';
 
 // ---- 客户端消息定义 ----
 
@@ -1015,6 +1132,13 @@ export interface SpeechMessage {
 }
 
 /**
+ * 结束发言 — 当前发言者主动结束自己的发言回合
+ */
+export interface FinishSpeechMessage {
+  type: 'FINISH_SPEECH';
+}
+
+/**
  * 法官修改夜间行动顺序 — 下一晚生效
  */
 export interface UpdateNightOrderMessage {
@@ -1129,6 +1253,14 @@ export interface ArbitrationVoteClientMessage {
 }
 
 /**
+ * 法官解散房间 — 仅法官可发送
+ * 解散后房间销毁，所有玩家收到 ROOM_DISSOLVED 消息
+ */
+export interface DissolveRoomClientMessage {
+  type: 'DISSOLVE_ROOM';
+}
+
+/**
  * 管理员拉取日志
  */
 export interface AdminFetchLogsMessage {
@@ -1141,6 +1273,10 @@ export interface AdminFetchLogsMessage {
   gameId?: string;
   fromTime?: number;
   toTime?: number;
+  /** 按动作类型筛选（可多选） */
+  actionTypes?: ActionType[];
+  /** 按游戏阶段筛选（可多选） */
+  phases?: GamePhase[];
   limit?: number;
 }
 
@@ -1151,6 +1287,42 @@ export interface AdminCleanupConfigMessage {
   type: 'ADMIN_CLEANUP_CONFIG';
   /** 管理员密钥（用于鉴权） */
   secret: string;
+}
+
+/**
+ * 警长选举投票 — 玩家投票选举警长
+ */
+export interface SheriffElectionVoteMessage {
+  type: 'SHERIFF_ELECTION_VOTE';
+  /** 投票目标座位号，null 表示弃权 */
+  targetSeat: number | null;
+}
+
+/**
+ * 警徽移交 — 警长死亡时选择移交警徽的目标玩家
+ */
+export interface SheriffTransferClientMessage {
+  type: 'SHERIFF_TRANSFER';
+  /** 移交目标座位号 */
+  targetSeat: number;
+}
+
+/**
+ * 重连消息 — 断连后使用之前的 playerId 恢复会话
+ */
+export interface ReconnectMessage {
+  type: 'RECONNECT';
+  /** 之前的玩家 ID */
+  playerId: string;
+  /** 之前所在的房间码 */
+  roomCode: string;
+}
+
+/**
+ * 心跳消息 — 客户端定期发送 PING 以检测连接存活
+ */
+export interface PingMessage {
+  type: 'PING';
 }
 
 /**
@@ -1169,6 +1341,7 @@ export type ClientMessage =
   | HunterGunMessage
   | WolfKingGunMessage
   | SpeechMessage
+  | FinishSpeechMessage
   | UpdateNightOrderMessage
   | JudgeOverrideSettlementMessage
   | JudgeForceNextPhaseMessage
@@ -1183,8 +1356,13 @@ export type ClientMessage =
   | DeadChatClientMessage
   | AppealClientMessage
   | ArbitrationVoteClientMessage
+  | DissolveRoomClientMessage
   | AdminFetchLogsMessage
-  | AdminCleanupConfigMessage;
+  | AdminCleanupConfigMessage
+  | SheriffElectionVoteMessage
+  | SheriffTransferClientMessage
+  | ReconnectMessage
+  | PingMessage;
 
 // ---- 服务端消息定义 ----
 
@@ -1300,6 +1478,47 @@ export interface IdiotRevealMessage {
   nickname: string;
 }
 
+/** 警长选举结果 */
+export interface SheriffElectedMessage {
+  type: 'SHERIFF_ELECTED';
+  seatNumber: number;
+  nickname: string;
+  votes: Record<number, number>;
+}
+
+/** 警长选举平票 */
+export interface SheriffElectionTieMessage {
+  type: 'SHERIFF_ELECTION_TIE';
+  tieCandidates: number[];
+  votes: Record<number, number>;
+}
+
+/** 警徽移交请求 — 通知警长玩家选择移交目标 */
+export interface SheriffTransferRequestMessage {
+  type: 'SHERIFF_TRANSFER_REQUEST';
+  /** 死亡警长的座位号 */
+  deadSheriffSeat: number;
+  /** 死亡警长的昵称 */
+  deadSheriffNickname: string;
+  /** 可移交的存活玩家座位号列表 */
+  availableTargets: number[];
+  /** 超时时间（秒） */
+  timeout: number;
+}
+
+/** 警徽移交结果 */
+export interface SheriffTransferResultMessage {
+  type: 'SHERIFF_TRANSFER_RESULT';
+  /** 原警长座位号 */
+  fromSeat: number;
+  /** 新警长座位号 */
+  toSeat: number;
+  /** 新警长昵称 */
+  toNickname: string;
+  /** 是否超时自动移交 */
+  isTimeout: boolean;
+}
+
 export interface GameOverMessage {
   type: 'GAME_OVER';
   winner: Faction;
@@ -1364,6 +1583,28 @@ export interface PlayerReadyMessage {
 }
 
 /**
+ * 夜间倒计时广播 — 每秒向所有玩家推送当前夜间子阶段剩余时间
+ */
+export interface NightCountdownMessage {
+  type: 'NIGHT_COUNTDOWN';
+  /** 当前行动角色ID */
+  roleId: RoleId;
+  /** 剩余时间（秒） */
+  remaining: number;
+}
+
+/**
+ * 发言倒计时广播 — 每秒向所有玩家推送当前发言者剩余时间
+ */
+export interface SpeechCountdownMessage {
+  type: 'SPEECH_COUNTDOWN';
+  /** 当前发言者座位号 */
+  seatNumber: number;
+  /** 剩余时间（秒） */
+  remaining: number;
+}
+
+/**
  * 阶段提醒 — 通知当前应行动的角色
  */
 export interface PhaseReminderMessage {
@@ -1408,6 +1649,17 @@ export interface AdminLogsResultMessage {
   type: 'ADMIN_LOGS_RESULT';
   logs: ActionLogDTO[];
   total: number;
+}
+
+/** 管理员清理配置结果 */
+export interface AdminCleanupResultMessage {
+  type: 'ADMIN_CLEANUP_RESULT';
+  /** 清理的房间数量 */
+  modifiedCount: number;
+  /** 是否成功 */
+  success: boolean;
+  /** 错误信息（失败时） */
+  error?: string;
 }
 
 /** 规则24：狼人阶段被跳过（隐狼唯一存活且被恐惧等） */
@@ -1462,6 +1714,55 @@ export interface ArbitrationVoteMessage {
 }
 
 /**
+ * 房间解散通知 — 法官解散房间后广播给所有玩家
+ * 包含该局游戏中所有玩家已知的信息（角色、存活状态等）
+ */
+export interface RoomDissolvedMessage {
+  type: 'ROOM_DISSOLVED';
+  /** 解散原因 */
+  reason: string;
+  /** 房间中所有玩家的已知信息 */
+  players: Array<{
+    seatNumber: number;
+    nickname: string;
+    role: RoleId | null;
+    status: PlayerStatus | null;
+  }>;
+}
+
+/** 重连成功消息 */
+export interface ReconnectSuccessMessage {
+  type: 'RECONNECT_SUCCESS';
+  playerId: string;
+  roomCode: string;
+}
+
+/** 法官操作类型枚举 */
+export type JudgeActionType =
+  | 'PAUSE'
+  | 'RESUME'
+  | 'FORCE_NEXT_PHASE'
+  | 'OVERRIDE_SETTLEMENT'
+  | 'SKIP_SPEECH'
+  | 'MODIFY_SPEECH_ORDER'
+  | 'MODIFY_NIGHT_ORDER'
+  | 'TRIGGER_KNIGHT_DUEL'
+  | 'TRIGGER_WHITE_WOLF';
+
+/** 法官操作通知消息 */
+export interface JudgeActionMessage {
+  type: 'JUDGE_ACTION';
+  action: JudgeActionType;
+  message: string;
+  data: Record<string, unknown>;
+}
+
+/** 心跳响应消息 — 服务端响应客户端 PING */
+export interface PongMessage {
+  type: 'PONG';
+}
+
+/**
  * 服务端消息联合类型
  */
 export type ServerMessage =
@@ -1477,6 +1778,10 @@ export type ServerMessage =
   | HunterGunResultMessage
   | WolfKingGunResultMessage
   | IdiotRevealMessage
+  | SheriffElectedMessage
+  | SheriffElectionTieMessage
+  | SheriffTransferRequestMessage
+  | SheriffTransferResultMessage
   | GameOverMessage
   | ErrorMessage
   | JudgeWarningMessage
@@ -1488,12 +1793,19 @@ export type ServerMessage =
   | WolfVoteUpdateMessage
   | WolfChatHistoryMessage
   | AdminLogsResultMessage
+  | AdminCleanupResultMessage
   | WolfPhaseSkippedMessage
   | DeadChatMessage
   | DayVoteRevealMessage
   | SpeechContentMessage
   | AppealEventMessage
-  | ArbitrationVoteMessage;
+  | ArbitrationVoteMessage
+  | RoomDissolvedMessage
+  | NightCountdownMessage
+  | SpeechCountdownMessage
+  | ReconnectSuccessMessage
+  | JudgeActionMessage
+  | PongMessage;
 
 // ============================================================================
 // 第六部分：全局日志与复盘 (Action Logger)
@@ -1524,6 +1836,7 @@ export type ActionType =
   | 'SPEECH_START'
   | 'SPEECH_CONTENT'
   | 'SPEECH_SKIP'
+  | 'SPEECH_FINISH'
   | 'VOTE_CAST'
   | 'VOTE_RESULT'
   | 'PK_VOTE_START'
@@ -1533,6 +1846,12 @@ export type ActionType =
   | 'HUNTER_GUN'
   | 'WOLF_KING_GUN'
   | 'IDIOT_REVEAL'
+  // 警长选举
+  | 'SHERIFF_ELECTION_START'
+  | 'SHERIFF_ELECTION_VOTE'
+  | 'SHERIFF_ELECTED'
+  | 'SHERIFF_ELECTION_TIE'
+  | 'SHERIFF_TRANSFER'
   // 法官操作
   | 'JUDGE_OVERRIDE_SETTLEMENT'
   | 'JUDGE_FORCE_NEXT_PHASE'

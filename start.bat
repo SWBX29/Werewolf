@@ -9,7 +9,7 @@ goto :start
 :start
 echo [启动] 正在启动狼人杀服务器...
 echo.
-echo   前端: http://localhost:5173
+echo   前端: http://localhost:5180
 echo   后端: ws://localhost:3001
 echo.
 echo   按 Ctrl+C 停止服务器

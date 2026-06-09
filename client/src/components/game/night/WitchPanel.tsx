@@ -1,6 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import TargetSelector from '../TargetSelector';
+import ConfirmDialog from '../ConfirmDialog';
 
 type WitchStep = 'antidote' | 'poison' | 'done';
 
@@ -23,19 +24,45 @@ export default function WitchPanel() {
 
   const [poisonTarget, setPoisonTarget] = useState<number | null>(null);
   const [useAntidote, setUseAntidote] = useState(false);
-  const [step, setStep] = useState<WitchStep>(
-    !antidoteUsed ? 'antidote' : !poisonUsed ? 'poison' : 'done'
-  );
+  const [step, setStep] = useState<WitchStep>('antidote');
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
+  // Bug 2 修复：使用 useEffect 同步 step 状态，处理重连场景
+  useEffect(() => {
+    // 根据药水使用状态和当前步骤确定正确的步骤
+    if (antidoteUsed && poisonUsed) {
+      setStep('done');
+    } else if (antidoteUsed && step === 'antidote') {
+      setStep('poison');
+    } else if (!antidoteUsed && step === 'done' && !poisonUsed) {
+      // 重连时如果解药未用但步骤是 done，重置为 antidote
+      setStep('antidote');
+    }
+  }, [antidoteUsed, poisonUsed]);
 
   if (!nightActionRequest) return null;
 
   const werewolfKillTarget = nightActionRequest.werewolfKillTarget;
   const guardProtectTarget = nightActionRequest.guardProtectTarget;
 
-  // 判断女巫能否自救
+  // Bug 1 修复：正确判断女巫能否自救
+  // 基于 ruleConfig.witchSaveSelf 规则和当前轮次判断
   const canSaveSelf = (() => {
+    // 如果女巫不是被杀目标，自救问题不适用，返回 true（可以救别人）
     if (werewolfKillTarget !== mySeat) return true;
-    return !nightActionRequest.disabledTargets.includes(werewolfKillTarget);
+    // 女巫是被杀目标，检查自救规则
+    const witchSaveSelfRule = nightActionRequest.witchSaveSelfRule ?? 'FIRST_NIGHT';
+    const currentRound = playerState?.round ?? 1;
+    switch (witchSaveSelfRule) {
+      case 'NEVER':
+        return false; // 永不允许自救
+      case 'FIRST_NIGHT':
+        return currentRound === 1; // 仅第一夜可自救
+      case 'ALWAYS':
+        return true; // 始终可自救
+      default:
+        return true;
+    }
   })();
 
   const selfSaveDisabled = werewolfKillTarget === mySeat && !canSaveSelf;
@@ -73,7 +100,12 @@ export default function WitchPanel() {
     }
   };
 
-  const handleUsePoison = () => {
+  const handleUsePoisonClick = () => {
+    if (poisonTarget === null || isActionLocked) return;
+    setConfirmOpen(true);
+  };
+
+  const handleUsePoisonConfirm = () => {
     if (poisonTarget === null || isActionLocked) return;
     if (!canUseBothPotions) {
       // 不允许同时用药，使用毒药则放弃解药
@@ -81,6 +113,7 @@ export default function WitchPanel() {
     } else {
       handleSubmit(useAntidote, true, poisonTarget);
     }
+    setConfirmOpen(false);
   };
 
   const handleSkipPoison = () => {
@@ -188,7 +221,7 @@ export default function WitchPanel() {
             <button
               className="btn-primary bg-red-700 hover:bg-red-600 disabled:opacity-50"
               disabled={poisonTarget === null || isActionLocked}
-              onClick={handleUsePoison}
+              onClick={handleUsePoisonClick}
             >
               使用毒药
             </button>
@@ -212,6 +245,16 @@ export default function WitchPanel() {
       {isActionLocked && (
         <div className="mt-3 text-sm text-indigo-400">✓ 操作已提交</div>
       )}
+
+      {/* 毒药二次确认弹窗 */}
+      <ConfirmDialog
+        open={confirmOpen}
+        title="确认使用毒药"
+        message={`确定要对 ${poisonTarget}号 玩家使用毒药吗？此操作不可撤销。`}
+        confirmLabel="使用毒药"
+        onConfirm={handleUsePoisonConfirm}
+        onCancel={() => setConfirmOpen(false)}
+      />
     </div>
   );
 }

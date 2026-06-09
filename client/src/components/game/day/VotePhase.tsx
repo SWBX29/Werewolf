@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import { ROLE_META } from '@langrensha/shared';
 import type { RoleId } from '@langrensha/shared';
@@ -10,9 +10,12 @@ const VotePhase: React.FC = () => {
   const voteResult = useGameStore((s) => s.voteResult);
   const isActionLocked = useGameStore((s) => s.isActionLocked);
   const submitVote = useGameStore((s) => s.submitVote);
+  const setActionLocked = useGameStore((s) => s.setActionLocked);
   const whiteWolfExplode = useGameStore((s) => s.whiteWolfExplode);
   const ruleConfig = useGameStore((s) => s.ruleConfig);
   const dayAnnouncement = useGameStore((s) => s.dayAnnouncement);
+  const speechMessages = useGameStore((s) => s.speechMessages);
+  const sendSpeech = useGameStore((s) => s.sendSpeech);
 
   const [selectedSeat, setSelectedSeat] = useState<number | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
@@ -20,6 +23,10 @@ const VotePhase: React.FC = () => {
   const [showWhiteWolfPanel, setShowWhiteWolfPanel] = useState(false);
   const [whiteWolfTarget, setWhiteWolfTarget] = useState<number | null>(null);
   const [showWhiteWolfConfirm, setShowWhiteWolfConfirm] = useState(false);
+
+  // Bug 5 修复：投票阶段全体发言
+  const [speechInput, setSpeechInput] = useState('');
+  const messagesEndRef = useRef<HTMLDivElement>(null);
 
   if (!playerState) return null;
 
@@ -35,7 +42,11 @@ const VotePhase: React.FC = () => {
     .map((p) => p.seatNumber);
 
   // PK阶段仅限PK候选人为投票目标
-  const effectiveTargets = isPK && voteResult?.pkCandidates?.length
+  // Bug 6 修复：使用 !== undefined 检查而非 .length，避免空数组 fallback 到过期数据
+  const pkCandidatesFromState = playerState.pkCandidates;
+  const effectiveTargets = isPK && pkCandidatesFromState !== undefined
+    ? voteTargets.filter((s) => pkCandidatesFromState.includes(s))
+    : isPK && voteResult?.pkCandidates
     ? voteTargets.filter((s) => voteResult.pkCandidates.includes(s))
     : voteTargets;
 
@@ -69,6 +80,7 @@ const VotePhase: React.FC = () => {
 
   const confirmVote = () => {
     submitVote(confirmTarget);
+    setActionLocked(true);
     setShowConfirm(false);
   };
 
@@ -271,10 +283,48 @@ const VotePhase: React.FC = () => {
         )}
       </div>
 
+      {/* Bug 5 修复：投票阶段全体发言区域 */}
+      {!voteResult && myPlayer?.status === 'alive' && !myPlayer?.isMuted && (
+        <div className="card border-amber-800/30 bg-night-900/50 p-3 space-y-2">
+          <div className="flex gap-2">
+            <input
+              type="text"
+              className="input flex-1"
+              placeholder="投票阶段可发言..."
+              value={speechInput}
+              onChange={(e) => setSpeechInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault();
+                  const trimmed = speechInput.trim();
+                  if (trimmed) {
+                    sendSpeech(trimmed);
+                    setSpeechInput('');
+                  }
+                }
+              }}
+              maxLength={500}
+            />
+            <button
+              className="btn-secondary text-sm"
+              onClick={() => {
+                const trimmed = speechInput.trim();
+                if (trimmed) {
+                  sendSpeech(trimmed);
+                  setSpeechInput('');
+                }
+              }}
+            >
+              发言
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* PK候选人提示 */}
-      {isPK && voteResult?.pkCandidates?.length && !voteData && (
+      {isPK && (pkCandidatesFromState !== undefined && pkCandidatesFromState.length > 0 || voteResult?.pkCandidates?.length) && !voteData && (
         <div className="p-2 bg-yellow-900/20 rounded border border-yellow-700/50 text-sm text-yellow-300">
-          PK候选人：{voteResult.pkCandidates.map((s) => `${s}号 ${getPlayerName(s)}`).join('、')}
+          PK候选人：{(pkCandidatesFromState !== undefined && pkCandidatesFromState.length > 0 ? pkCandidatesFromState : voteResult?.pkCandidates ?? []).map((s) => `${s}号 ${getPlayerName(s)}`).join('、')}
         </div>
       )}
 

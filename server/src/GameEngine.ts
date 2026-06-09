@@ -109,6 +109,18 @@ export type GameEventCallback = (roomCode: string, eventType: string, data: Reco
 export type NightSubPhaseAdvanceCallback = (roomCode: string) => void;
 
 /**
+ * 夜间倒计时广播回调
+ * 每秒触发一次，向所有客户端推送当前夜间子阶段剩余时间
+ */
+export type NightCountdownCallback = (roomCode: string, roleId: RoleId, remaining: number) => void;
+
+/**
+ * 发言倒计时广播回调
+ * 每秒触发一次，向所有客户端推送当前发言者剩余时间
+ */
+export type SpeechCountdownCallback = (roomCode: string, seatNumber: number, remaining: number) => void;
+
+/**
  * 投票结果回调
  * 白天投票结算后触发，用于广播投票结果给客户端
  */
@@ -188,6 +200,12 @@ export class GameEngine {
   /** 夜间子阶段推进回调 */
   private onNightSubPhaseAdvance: NightSubPhaseAdvanceCallback;
 
+  /** 夜间倒计时广播回调 */
+  private onNightCountdown: NightCountdownCallback;
+
+  /** 发言倒计时广播回调 */
+  private onSpeechCountdown: SpeechCountdownCallback;
+
   /** 天亮公告回调 */
   private onDayAnnounce: DayAnnounceCallback;
 
@@ -202,6 +220,12 @@ export class GameEngine {
 
   /** 定时器引用（用于超时推进） */
   private timers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private timerDeadlines: Map<string, number> = new Map();
+  private timerCallbacks: Map<string, () => void> = new Map();
+  private pausedPhaseRemainingTime: number | null = null;
+  private pausedPhaseTimerName: string | null = null;
+  private pausedPhaseTimerCallback: (() => void) | null = null;
+  private nightActionStartTime: number | null = null;
 
   constructor(
     initialState: RoomState,
@@ -213,6 +237,8 @@ export class GameEngine {
     onWolfVoteUpdate?: WolfVoteUpdateCallback,
     onGameEvent?: GameEventCallback,
     onNightSubPhaseAdvance?: NightSubPhaseAdvanceCallback,
+    onNightCountdown?: NightCountdownCallback,
+    onSpeechCountdown?: SpeechCountdownCallback,
     onDayAnnounce?: DayAnnounceCallback,
     onVoteResult?: VoteResultCallback,
     onGameOver?: GameOverCallback,
@@ -227,6 +253,8 @@ export class GameEngine {
     this.onWolfVoteUpdate = onWolfVoteUpdate ?? (() => {});
     this.onGameEvent = onGameEvent ?? (() => {});
     this.onNightSubPhaseAdvance = onNightSubPhaseAdvance ?? (() => {});
+    this.onNightCountdown = onNightCountdown ?? (() => {});
+    this.onSpeechCountdown = onSpeechCountdown ?? (() => {});
     this.onDayAnnounce = onDayAnnounce ?? (() => {});
     this.onVoteResult = onVoteResult ?? (() => {});
     this.onGameOver = onGameOver ?? (() => {});
@@ -329,10 +357,16 @@ export class GameEngine {
       },
     });
 
-    // 进入第一个夜间
+    // 进入角色展示环节
     this.state.round = 1;
     this.state.startedAt = Date.now();
-    this.enterNightPhase();
+    this.state.phase = 'ROLE_REVEAL';
+    this.onPhaseChange('ROLE_REVEAL', null, this.state.round);
+
+    // 5秒后自动进入夜晚
+    this.setTimer('role_reveal', 5, () => {
+      this.enterNightPhase();
+    });
 
     return { success: true };
   }
@@ -423,8 +457,54 @@ export class GameEngine {
       if (roleId === 'hidden_wolf') continue;
 
       // 检查本局是否有该角色且存活
-      const hasRole = alivePlayers.some((p) => p.role === roleId);
-      if (!hasRole) continue;
+      // werewolf 子阶段代表所有共同睁眼狼人的集体行动阶段，
+      // 只要有任意共享狼人角色存活就应进入（不能仅检查 role === 'werewolf'）
+      let hasRole: boolean;
+      if (roleId === 'werewolf') {
+        const sharedRoles = this.state.config.sharedWolfRoles;
+        hasRole = alivePlayers.some((p) => isSharedWolfRole(p.role, sharedRoles));
+      } else {
+        hasRole = alivePlayers.some((p) => p.role === roleId);
+      }
+      if (!hasRole) {
+        // Bug 8 修复：角色无存活玩家时，使用模拟倒计时而非直接跳过
+        // 广播标准倒计时 + 随机延时后自动推进，防止暴露该角色已全灭的信息
+        const simulatedDelay = Math.floor(Math.random() * 11) + 5; // 5-15秒
+        this.state.nightSubPhase = {
+          currentRole: roleId,
+          currentRoleIndex: i,
+          isBlockedByNightmare: false,
+        };
+
+        // 设置标准倒计时定时器和倒计时广播
+        if (this.state.config.nightActionTimeout > 0) {
+          this.setNightActionTimer(roleId, this.state.config.nightActionTimeout);
+        }
+
+        // 随机延时后自动推进
+        this.setTimer('dead_role_auto_advance', simulatedDelay, () => {
+          if (this.state.phase !== 'NIGHT') return;
+          if (this.state.nightSubPhase?.currentRole !== roleId) return;
+
+          this.clearTimer(`night_${roleId}`);
+          this.clearNightCountdownTimer(roleId);
+
+          const nextIndex = i + 1;
+          this.advanceNightSubPhase(nextIndex);
+        });
+
+        // 发送阶段提醒（让所有玩家看到正常的阶段切换）
+        this.onPhaseReminder(
+          this.state.roomCode,
+          roleId,
+          this.state.round,
+          [], // 无行动玩家
+          this.state.config.nightActionTimeout,
+        );
+
+        this.onNightSubPhaseAdvance(this.state.roomCode);
+        return true;
+      }
 
       // 检查该角色是否有夜间行动
       if (!hasNightAction(roleId)) continue;
@@ -449,7 +529,8 @@ export class GameEngine {
         isBlockedByNightmare: isBlocked,
       };
 
-      // 如果被封印，自动跳过并记录
+      // 如果被封印：不跳过阶段，而是设置标准倒计时广播 + 随机延时自动提交空操作
+      // 所有玩家看到标准倒计时（如30秒），但被恐惧玩家的操作在 5-15 秒后被自动提交（不行动）
       if (isBlocked) {
         const blockedPlayer = roleId === 'werewolf'
           ? alivePlayers.filter((p) => isSharedWolfRole(p.role, this.state.config.sharedWolfRoles))[0]
@@ -463,11 +544,11 @@ export class GameEngine {
           targetNickname: null,
           detail: {
             roleId,
-            reason: '被噩梦之影恐惧封印',
+            reason: 'nightmare',
           },
         });
 
-        // 记录封印的夜间行动
+        // 记录封印的夜间行动（空操作）
         this.state.nightActions[roleId] = {
           roleId,
           actorSeat: blockedPlayer.seatNumber,
@@ -477,12 +558,47 @@ export class GameEngine {
           blockedByNightmare: true,
         };
 
-        // 继续推进到下一个子阶段
-        return this.advanceNightSubPhase(i + 1);
+        // 设置标准倒计时定时器 + 倒计时广播（全体玩家可见，保持与正常阶段一致）
+        if (this.state.config.nightActionTimeout > 0) {
+          this.setNightActionTimer(roleId, this.state.config.nightActionTimeout);
+        }
+
+        // 随机 5-15 秒后自动提交空操作并推进到下一个子阶段
+        // 模拟真实玩家的操作时间，避免被恐惧阶段秒过暴露信息
+        const autoAdvanceDelay = Math.floor(Math.random() * 11) + 5;
+        this.setTimer('blocked_auto_advance', autoAdvanceDelay, () => {
+          // 防护：如果当前已不在夜间或子阶段已变化，忽略
+          if (this.state.phase !== 'NIGHT') return;
+          if (this.state.nightSubPhase?.currentRole !== roleId) return;
+          if (!this.state.nightSubPhase?.isBlockedByNightmare) return;
+
+          // 清除标准倒计时定时器和倒计时广播
+          this.clearTimer(`night_${roleId}`);
+          this.clearNightCountdownTimer(roleId);
+
+          // 推进到下一个子阶段
+          const nextIndex = this.state.nightSubPhase!.currentRoleIndex + 1;
+          this.advanceNightSubPhase(nextIndex);
+        });
+
+        // 发送阶段提醒
+        const actorSeats = this.getActorSeatsForSubPhase(roleId);
+        this.onPhaseReminder(
+          this.state.roomCode,
+          roleId,
+          this.state.round,
+          actorSeats,
+          this.state.config.nightActionTimeout,
+        );
+
+        // 广播房间状态，确保前端感知子阶段切换
+        this.onNightSubPhaseAdvance(this.state.roomCode);
+
+        return true;
       }
 
-      // 规则10：守卫无合法目标时自动跳过
-      if (roleId === 'guard') {
+      // 规则10：守卫无合法目标时自动跳过（被恐惧时已在上方处理，不重复检查）
+      if (!isBlocked && roleId === 'guard') {
         const guardPlayer = alivePlayers.find((p) => p.role === 'guard');
         if (guardPlayer) {
           const { disabledTargets } = this.getDisabledTargets(guardPlayer.id);
@@ -506,14 +622,17 @@ export class GameEngine {
         }
       }
 
-      // ---- 狼人子阶段特殊处理 ----
+      // ---- 狼人子阶段特殊处理（被恐惧时跳过，已在上方处理） ----
       // 当遇到 'werewolf' 时，这是所有共同睁眼狼人的集体行动阶段
-      if (roleId === 'werewolf') {
-        this.enterWolfSubPhase();
+      if (!isBlocked && roleId === 'werewolf') {
+        if (this.enterWolfSubPhase()) {
+          // 所有狼人被恐惧，阶段已在 enterWolfSubPhase 内推进，直接返回
+          return true;
+        }
       }
 
-      // ---- 机械狼子阶段特殊处理 ----
-      if (roleId === 'mechanical_wolf') {
+      // ---- 机械狼子阶段特殊处理（被恐惧时跳过，已在上方处理） ----
+      if (!isBlocked && roleId === 'mechanical_wolf') {
         const mwPlayer = alivePlayers.find((p) => p.role === 'mechanical_wolf');
         if (mwPlayer) {
           // 第一晚初始化为 selecting
@@ -540,8 +659,8 @@ export class GameEngine {
         }
       }
 
-      // 设置超时定时器（SYSTEM 模式下自动推进）
-      if (this.state.gameMode === 'SYSTEM' && this.state.config.nightActionTimeout > 0) {
+      // 设置超时定时器和倒计时广播（所有模式下都广播倒计时，仅SYSTEM模式超时自动推进）
+      if (this.state.config.nightActionTimeout > 0) {
         this.setNightActionTimer(roleId, this.state.config.nightActionTimeout);
       }
 
@@ -578,15 +697,15 @@ export class GameEngine {
     const alivePlayers = this.state.players.filter((p) => !p.isJudge && p.status === 'alive');
 
     if (roleId === 'werewolf') {
-      // 狼人子阶段：所有共同睁眼的狼人
+      // 狼人子阶段：所有共同睁眼的狼人（被恐惧的狼人无法参与投票）
       const sharedRoles = this.state.config.sharedWolfRoles;
       const actors = alivePlayers
         .filter((p) => isSharedWolfRole(p.role, sharedRoles))
-        .filter((p) => !(isHiddenWolf(p.role) && p.isNightmared)) // 规则4：隐狼被恐惧无法参与投票
+        .filter((p) => !p.isNightmared) // 被恐惧的狼人无法参与投票
         .map((p) => p.seatNumber);
-      // 规则7：机械狼在条件满足时以狼人身份参与投票
+      // 规则7：机械狼在条件满足时以狼人身份参与投票（被恐惧时除外）
       const mwPlayer = alivePlayers.find((p) => p.role === 'mechanical_wolf');
-      if (mwPlayer && this.canMechanicalWolfActAsWolf() && !actors.includes(mwPlayer.seatNumber)) {
+      if (mwPlayer && this.canMechanicalWolfActAsWolf() && !mwPlayer.isNightmared && !actors.includes(mwPlayer.seatNumber)) {
         actors.push(mwPlayer.seatNumber);
       }
       return actors;
@@ -601,19 +720,34 @@ export class GameEngine {
   /**
    * 进入狼人子阶段
    * 初始化狼人投票状态，向所有共同睁眼的狼人推送聊天历史
+   * @returns true 表示阶段已被跳过（所有狼人被恐惧），调用方应提前返回
    */
-  private enterWolfSubPhase(): void {
-    // 规则24：隐狼唯一存活且被恐惧时，狼人阶段自动跳过
-    const aliveWolves = this.state.players.filter(
-      (p) => !p.isJudge && p.status === 'alive' && isEvilRole(p.role)
+  private enterWolfSubPhase(): boolean {
+    // 与 getActorSeatsForSubPhase / submitWolfVote 保持一致：
+    // 使用 isSharedWolfRole + 机械狼（可行动时），排除被恐惧的狼人
+    const sharedRoles = this.state.config.sharedWolfRoles;
+    const alivePlayers = this.state.players.filter(
+      (p) => !p.isJudge && p.status === 'alive'
     );
-    const canActWolves = aliveWolves.filter((p) => {
-      if (isHiddenWolf(p.role) && p.isNightmared) return false;
-      if (p.isNightmared) return false;
-      return true;
-    });
 
-    if (canActWolves.length === 0 && aliveWolves.length > 0) {
+    // 共同睁眼的狼人（排除被恐惧）
+    const canActWolves = alivePlayers.filter(
+      (p) => isSharedWolfRole(p.role, sharedRoles) && !p.isNightmared
+    );
+
+    // 机械狼（可以以狼人身份行动且未被恐惧时也算）
+    const mwPlayer = alivePlayers.find((p) => p.role === 'mechanical_wolf');
+    const mwCanAct = mwPlayer && this.canMechanicalWolfActAsWolf() && !mwPlayer.isNightmared;
+
+    // 全部存活的共同睁眼狼人（含被恐惧的，用于判断是否"有狼人但全部被恐惧"）
+    const allSharedWolves = alivePlayers.filter(
+      (p) => isSharedWolfRole(p.role, sharedRoles)
+    );
+    const allWolvesIncludingMw = mwPlayer && this.canMechanicalWolfActAsWolf()
+      ? [...allSharedWolves, mwPlayer]
+      : allSharedWolves;
+
+    if (canActWolves.length === 0 && !mwCanAct && allWolvesIncludingMw.length > 0) {
       // 所有狼人被恐惧，跳过狼人阶段
       this.logAction({
         actorSeat: 0,
@@ -623,20 +757,19 @@ export class GameEngine {
         targetNickname: null,
         detail: {
           publicMessage: '夜深了，似乎有什么力量阻断了狼人的行动……',
-          judgeReason: aliveWolves.length === 1 && isHiddenWolf(aliveWolves[0].role)
-            ? '隐狼（唯一存活狼人）被恐惧，狼人阶段自动跳过'
-            : '所有存活狼人被恐惧，狼人阶段自动跳过',
+          judgeReason: '所有存活狼人被恐惧，狼人阶段自动跳过',
         },
       });
       // 跳过狼人阶段，推进到下一个子阶段
       if (this.state.nightSubPhase) {
         this.advanceNightSubPhase(this.state.nightSubPhase.currentRoleIndex + 1);
       }
-      return;
+      return true; // 告知调用方：阶段已跳过
     }
 
     this.state.wolfVotes = {};
     this.state.wolfVoteConsensus = false;
+    return false;
   }
 
   /**
@@ -774,6 +907,7 @@ export class GameEngine {
 
     // ---- 清除超时定时器 ----
     this.clearTimer(`night_${roleId}`);
+    this.clearNightCountdownTimer(roleId);
 
     // ---- 记录日志 ----
     this.logAction({
@@ -784,7 +918,9 @@ export class GameEngine {
       targetNickname: targetSeat ? this.getPlayerBySeat(targetSeat)?.nickname || null : null,
       detail: {
         roleId,
+        targetSeat,
         extra,
+        blockedByNightmare: false,
       },
     });
 
@@ -815,6 +951,15 @@ export class GameEngine {
       return { success: false, error: '你被噩梦之影恐惧，无法参与投票' };
     }
 
+    // 校验玩家是否有资格参与狼人投票
+    const sharedRoles = this.state.config.sharedWolfRoles;
+    const isSharedWolf = isSharedWolfRole(player.role, sharedRoles);
+    const isMechanicalWolfCanAct = player.role === 'mechanical_wolf' && this.canMechanicalWolfActAsWolf();
+    
+    if (!isSharedWolf && !isMechanicalWolfCanAct) {
+      return { success: false, error: '你无法参与狼人投票' };
+    }
+
     const killTarget = extra.killTarget ?? targetSeat;
     if (killTarget === null) {
       return { success: false, error: '必须选择击杀目标' };
@@ -842,13 +987,21 @@ export class GameEngine {
       actionType: 'WOLF_VOTE_CAST',
       targetSeat: killTarget,
       targetNickname: target.nickname,
-      detail: { voterRole: player.role },
+      detail: {
+        voterRole: player.role,
+        voterSeat: player.seatNumber,
+        targetSeat: killTarget,
+        currentVoteSummary: Object.values(this.state.wolfVotes).reduce<Record<number, number>>((acc, v) => {
+          acc[v] = (acc[v] || 0) + 1;
+          return acc;
+        }, {}),
+      },
     });
 
     // 检查是否所有共同睁眼的狼人都已投票
-    const sharedRoles = this.state.config.sharedWolfRoles;
+    // 检查是否所有可行动的共同睁眼的狼人都已投票（排除被恐惧的狼人）
     const aliveWolves = this.state.players.filter(
-      (p) => !p.isJudge && p.status === 'alive' && isSharedWolfRole(p.role, sharedRoles),
+      (p) => !p.isJudge && p.status === 'alive' && isSharedWolfRole(p.role, sharedRoles) && !p.isNightmared,
     );
     const allVoted = aliveWolves.every((w) => this.state.wolfVotes[w.seatNumber] !== undefined);
 
@@ -868,7 +1021,10 @@ export class GameEngine {
           actionType: 'WOLF_VOTE_CONSENSUS',
           targetSeat: votes[0],
           targetNickname: this.getPlayerBySeat(votes[0])?.nickname || null,
-          detail: { votes: this.state.wolfVotes },
+          detail: {
+            targetSeat: votes[0],
+            voteDetails: this.state.wolfVotes,
+          },
         });
 
         // 通知投票更新
@@ -881,6 +1037,7 @@ export class GameEngine {
 
         // 清除超时定时器，推进到下一个子阶段
         this.clearTimer('night_werewolf');
+        this.clearNightCountdownTimer('werewolf');
         const nextIndex = (this.state.nightSubPhase?.currentRoleIndex ?? 0) + 1;
         this.advanceNightSubPhase(nextIndex);
       } else {
@@ -927,7 +1084,7 @@ export class GameEngine {
         if (target.isJudge) return { valid: false, error: '不能恐惧法官' };
         // 规则七：不能恐惧自己
         if (targetSeat === player.seatNumber) return { valid: false, error: '不能恐惧自己' };
-        if (isEvilRole(target.role)) return { valid: false, error: '不能恐惧狼人阵营' };
+        // 噩梦可以恐惧狼人阵营角色（不再限制）
         // 规则二：不能连续恐惧同一人
         if (player.nightmareTargetHistory.includes(targetSeat)) {
           return { valid: false, error: '不能重复恐惧同一人' };
@@ -937,16 +1094,18 @@ export class GameEngine {
 
       case 'guard': {
         const protectTarget = extra.protectTarget ?? targetSeat;
-        if (protectTarget === null) return { valid: false, error: '必须选择守护目标' };
-        const target = this.getPlayerBySeat(protectTarget);
-        if (!target || target.status !== 'alive') return { valid: false, error: '目标不合法' };
-        // 规则二：不可重复守护同一人（无论隔多少晚）
-        if (player.guardProtectedHistory.includes(protectTarget)) {
-          return { valid: false, error: '不可重复守护同一人' };
-        }
-        // 规则五：仅第一晚可以守护自己
-        if (protectTarget === player.seatNumber && this.state.round > 1) {
-          return { valid: false, error: '仅第一晚可以守护自己' };
+        // 允许空守（protectTarget === null），执行阶段会正确处理
+        if (protectTarget !== null) {
+          const target = this.getPlayerBySeat(protectTarget);
+          if (!target || target.status !== 'alive') return { valid: false, error: '目标不合法' };
+          // 规则二：不可重复守护同一人（无论隔多少晚）
+          if (player.guardProtectedHistory.includes(protectTarget)) {
+            return { valid: false, error: '不可重复守护同一人' };
+          }
+          // 规则五：仅第一晚可以守护自己
+          if (protectTarget === player.seatNumber && this.state.round > 1) {
+            return { valid: false, error: '仅第一晚可以守护自己' };
+          }
         }
         return { valid: true };
       }
@@ -1191,6 +1350,10 @@ export class GameEngine {
 
       if (isGuarded && isSaved) {
         // ---- 同守同救冲突 ----
+        // Bug 81 说明：guardWitchConflict 规则决定同守同救时的结果
+        // DEATH: 守卫和女巫同时保护同一人，导致该人死亡（双药冲突）
+        // ALIVE: 算作救活，该人存活
+        // 这是游戏规则设计，两种模式都是合理的
         if (config.guardWitchConflict === 'DEATH') {
           // 双药冲突导致死亡
           deaths.push({
@@ -1224,7 +1387,9 @@ export class GameEngine {
 
     // ---- 2. 女巫毒药判定 ----
     if (this.state.witchPoisonTarget !== null) {
-      // 检查毒药目标是否已被狼人击杀（同一人不可能死两次）
+      // Bug 82 说明：检查毒药目标是否已被狼人击杀
+      // 同一人不可能死两次，如果狼人已经杀了该目标，毒药不再重复添加死亡记录
+      // 这是正确的行为：狼刀和毒药作用于同一人时，只记录一次死亡
       const alreadyDead = deaths.some((d) => d.seatNumber === this.state.witchPoisonTarget);
       if (!alreadyDead) {
         deaths.push({
@@ -1270,12 +1435,13 @@ export class GameEngine {
       detail: {
         round: this.state.round,
         werewolfTarget: this.state.werewolfTarget,
-        guardProtectTarget: this.state.guardProtectTarget,
         witchSaveTarget: this.state.witchSaveTarget,
         witchPoisonTarget: this.state.witchPoisonTarget,
+        guardProtectTarget: this.state.guardProtectTarget,
         nightmareTarget: this.state.nightmareTarget,
+        totalDeaths: deaths.filter((d) => !d.saved && !d.overridden).length,
         deaths: deaths.map((d) => ({
-          seat: d.seatNumber,
+          seatNumber: d.seatNumber,
           cause: d.cause,
           saved: d.saved,
         })),
@@ -1300,10 +1466,12 @@ export class GameEngine {
   // ==========================================================================
 
   /**
-   * 天亮公告 → 直接进入发言阶段
-   * 合并DAY_ANNOUNCE和DAY_SPEECH，不再保留独立的公告阶段
+   * 天亮公告 → 警长选举（第一天且启用时） → 发言阶段
    */
   private enterDayAnnounce(): void {
+    // 设置 DAY_ANNOUNCE 阶段（让客户端能正确显示天亮公告）
+    this.state.phase = 'DAY_ANNOUNCE';
+
     // 计算发言顺序（原先由 enterDayAnnounce 负责）
     this.calculateSpeechOrder();
 
@@ -1315,13 +1483,18 @@ export class GameEngine {
       targetNickname: null,
       detail: {
         round: this.state.round,
-        deaths: this.state.nightDeaths.map((d) => ({
-          seat: d.seatNumber,
-          cause: d.cause,
-        })),
+        deaths: this.state.nightDeaths.map((d) => {
+          const p = this.getPlayerBySeat(d.seatNumber);
+          return {
+            seatNumber: d.seatNumber,
+            nickname: p?.nickname ?? '',
+            cause: d.cause,
+          };
+        }),
         mutedSeats: this.state.players
           .filter((p) => p.isMuted)
           .map((p) => p.seatNumber),
+        isPeacefulNight: this.state.nightDeaths.length === 0,
       },
     });
 
@@ -1343,8 +1516,28 @@ export class GameEngine {
 
     this.onDayAnnounce(this.state.roomCode, announceDeaths, mutedSeats);
 
-    // 直接进入发言阶段，不再经过独立的 DAY_ANNOUNCE 阶段
-    this.enterDaySpeech();
+    this.onPhaseChange('DAY_ANNOUNCE', null, this.state.round);
+
+    // 检查夜间是否有警长死亡
+    const deadSheriffSeat = this.findDeadSheriffInNightDeaths();
+
+    // 5秒后自动过渡到下一阶段（警徽移交/警长选举或发言阶段）
+    this.setTimer('day_announce', 5, () => {
+      if (deadSheriffSeat !== null) {
+        // 警长夜间死亡，先进入警徽移交
+        this.enterSheriffTransfer(deadSheriffSeat, () => {
+          if (this.state.round === 1 && this.state.config.sheriffElectionEnabled) {
+            this.enterSheriffElection();
+          } else {
+            this.enterDaySpeech();
+          }
+        });
+      } else if (this.state.round === 1 && this.state.config.sheriffElectionEnabled) {
+        this.enterSheriffElection();
+      } else {
+        this.enterDaySpeech();
+      }
+    });
   }
 
   /**
@@ -1366,15 +1559,409 @@ export class GameEngine {
       detail: {
         speechOrder: this.state.speechOrder,
         currentSpeakerIndex: this.state.currentSpeakerIndex,
+        speakerSeat: this.state.speechOrder[this.state.currentSpeakerIndex] ?? null,
+        speakerNickname: this.state.speechOrder[this.state.currentSpeakerIndex]
+          ? this.getPlayerBySeat(this.state.speechOrder[this.state.currentSpeakerIndex])?.nickname ?? null
+          : null,
       },
     });
 
     this.onPhaseChange('DAY_SPEECH', null, this.state.round);
 
-    // SYSTEM 模式：设置发言超时
-    if (this.state.gameMode === 'SYSTEM' && this.state.config.speechTimeout > 0) {
+    // 设置发言超时
+    if (this.state.config.speechTimeout > 0) {
       this.setSpeechTimer();
     }
+  }
+
+  // ==========================================================================
+  // 警长选举
+  // ==========================================================================
+
+  /**
+   * 进入警长选举阶段
+   */
+  private enterSheriffElection(): void {
+    this.state.phase = 'SHERIFF_ELECTION';
+    this.state.sheriffElectionVotes = {};
+
+    this.logAction({
+      actorSeat: 0,
+      actorNickname: '系统',
+      actionType: 'SHERIFF_ELECTION_START',
+      targetSeat: null,
+      targetNickname: null,
+      detail: {
+        candidates: this.state.players
+          .filter((p) => p.status === 'alive' && !p.isSheriff && !p.isJudge)
+          .map((p) => p.seatNumber),
+      },
+    });
+
+    this.onPhaseChange('SHERIFF_ELECTION', null, this.state.round);
+
+    // 设置选举超时
+    if (this.state.config.voteTimeout > 0) {
+      this.setTimer('sheriff_election', this.state.config.voteTimeout, () => {
+        this.resolveSheriffElection();
+      });
+    }
+  }
+
+  /**
+   * 提交警长选举投票
+   */
+  submitSheriffElectionVote(
+    playerId: string,
+    targetSeat: number | null,
+  ): { success: boolean; error?: string } {
+    if (this.state.phase !== 'SHERIFF_ELECTION') {
+      return { success: false, error: '当前不在警长选举阶段' };
+    }
+
+    const player = this.getPlayerById(playerId);
+    if (!player) return { success: false, error: '玩家不存在' };
+    if (player.status !== 'alive') return { success: false, error: '你已死亡，无法投票' };
+    if (player.isJudge) return { success: false, error: '法官（上帝）不参与选举投票' };
+    if (player.idiotRevealed) return { success: false, error: '白痴翻牌后失去投票权' };
+
+    // 校验目标合法性
+    if (targetSeat !== null) {
+      const target = this.getPlayerBySeat(targetSeat);
+      if (!target || target.status !== 'alive') {
+        return { success: false, error: '投票目标不合法' };
+      }
+      if (target.isSheriff) {
+        return { success: false, error: '不能投给现任警长' };
+      }
+    }
+
+    this.state.sheriffElectionVotes[player.seatNumber] = targetSeat ?? -1; // -1 表示弃票
+
+    this.logAction({
+      actorSeat: player.seatNumber,
+      actorNickname: player.nickname,
+      actionType: 'SHERIFF_ELECTION_VOTE',
+      targetSeat,
+      targetNickname: targetSeat ? this.getPlayerBySeat(targetSeat)?.nickname || null : null,
+      detail: { isAbstain: targetSeat === null },
+    });
+
+    // 检查是否所有存活玩家都已投票
+    const aliveNonJudge = this.state.players.filter(
+      (p) => p.status === 'alive' && !p.isJudge && !p.idiotRevealed,
+    );
+    const allVoted = aliveNonJudge.every((p) => this.state.sheriffElectionVotes[p.seatNumber] !== undefined);
+    if (allVoted) {
+      this.clearTimer('sheriff_election');
+      this.resolveSheriffElection();
+    }
+
+    return { success: true };
+  }
+
+  /**
+   * 结算警长选举
+   */
+  private resolveSheriffElection(): void {
+    const votes = this.state.sheriffElectionVotes;
+
+    // 统计票数
+    const voteCount: Record<number, number> = {};
+    for (const [, target] of Object.entries(votes)) {
+      if (target !== null && target !== -1) {
+        voteCount[target] = (voteCount[target] || 0) + 1;
+      }
+    }
+
+    // 找最高票
+    let maxVotes = 0;
+    let winners: number[] = [];
+    for (const [seat, count] of Object.entries(voteCount)) {
+      if (count > maxVotes) {
+        maxVotes = count;
+        winners = [Number(seat)];
+      } else if (count === maxVotes) {
+        winners.push(Number(seat));
+      }
+    }
+
+    if (winners.length === 1) {
+      // 有明确当选者
+      const winnerSeat = winners[0];
+      const winnerPlayer = this.getPlayerBySeat(winnerSeat);
+      if (winnerPlayer) {
+        // 清除旧警长标记
+        for (const p of this.state.players) {
+          if (p.isSheriff) {
+            p.isSheriff = false;
+          }
+        }
+        winnerPlayer.isSheriff = true;
+
+        this.logAction({
+          actorSeat: 0,
+          actorNickname: '系统',
+          actionType: 'SHERIFF_ELECTED',
+          targetSeat: winnerSeat,
+          targetNickname: winnerPlayer.nickname,
+          detail: { votes: voteCount },
+        });
+
+        this.onGameEvent(this.state.roomCode, 'SHERIFF_ELECTED', {
+          seatNumber: winnerSeat,
+          nickname: winnerPlayer.nickname,
+          votes: voteCount,
+        });
+      }
+    } else if (winners.length > 1) {
+      // Bug 52 说明：警长选举平票时直接进入发言阶段，无 PK 机制
+      // 这是有意为之的设计决策：
+      // 1. 警长选举不如白天投票关键，平票时无人当选即可
+      // 2. 避免增加游戏复杂度和时长
+      // 3. 第一轮无警长时，发言顺序按默认规则进行
+      this.logAction({
+        actorSeat: 0,
+        actorNickname: '系统',
+        actionType: 'SHERIFF_ELECTION_TIE',
+        targetSeat: null,
+        targetNickname: null,
+        detail: { tieCandidates: winners, votes: voteCount },
+      });
+
+      this.onGameEvent(this.state.roomCode, 'SHERIFF_ELECTION_TIE', {
+        tieCandidates: winners,
+        votes: voteCount,
+      });
+    } else {
+      // 所有弃票，无人当选
+      this.logAction({
+        actorSeat: 0,
+        actorNickname: '系统',
+        actionType: 'SHERIFF_ELECTION_TIE',
+        targetSeat: null,
+        targetNickname: null,
+        detail: { tieCandidates: [], votes: voteCount, allAbstained: true },
+      });
+
+      this.onGameEvent(this.state.roomCode, 'SHERIFF_ELECTION_TIE', {
+        tieCandidates: [],
+        votes: voteCount,
+      });
+    }
+
+    // 选举结束，进入发言阶段
+    this.enterDaySpeech();
+  }
+
+  // ==========================================================================
+  // 警徽移交
+  // ==========================================================================
+
+  /**
+   * 进入警徽移交阶段
+   *
+   * 触发条件：警长死亡（夜间或白天）
+   * 流程：
+   *   1. 天亮告知昨晚情况后（DAY_ANNOUNCE），检测夜间死亡的警长
+   *   2. 提示警长死亡，需要移交警徽
+   *   3. 代表警长的玩家在限定时间内选择移交目标
+   *   4. 超时未移交则自动移交给场上存活的最小序号玩家
+   *   5. 移交后进入下一进程
+   *   6. 移交结果写入日志
+   */
+  private enterSheriffTransfer(deadSheriffSeat: number, afterTransfer: () => void): void {
+    this.state.phase = 'SHERIFF_TRANSFER';
+
+    // Bug 51 修复：保存死亡警长座位号
+    this._deadSheriffSeat = deadSheriffSeat;
+
+    const deadSheriff = this.getPlayerBySeat(deadSheriffSeat);
+    const deadSheriffNickname = deadSheriff?.nickname ?? '';
+
+    // 可移交目标：所有存活且非法官的玩家
+    const availableTargets = this.state.players
+      .filter((p) => p.status === 'alive' && !p.isJudge)
+      .map((p) => p.seatNumber);
+
+    this.logAction({
+      actorSeat: 0,
+      actorNickname: '系统',
+      actionType: 'SHERIFF_TRANSFER',
+      targetSeat: null,
+      targetNickname: null,
+      detail: {
+        deadSheriffSeat,
+        deadSheriffNickname,
+        availableTargets,
+        message: `警长 ${deadSheriffNickname}（${deadSheriffSeat}号）死亡，需要移交警徽`,
+      },
+    });
+
+    this.onPhaseChange('SHERIFF_TRANSFER', null, this.state.round);
+
+    // 广播移交请求给所有客户端
+    this.onGameEvent(this.state.roomCode, 'SHERIFF_TRANSFER_REQUEST', {
+      deadSheriffSeat,
+      deadSheriffNickname,
+      availableTargets,
+      timeout: this.state.config.voteTimeout,
+    });
+
+    // 保存回调，移交完成后执行
+    this._afterSheriffTransfer = afterTransfer;
+
+    // 设置移交超时
+    if (this.state.config.voteTimeout > 0) {
+      this.setTimer('sheriff_transfer', this.state.config.voteTimeout, () => {
+        this.resolveSheriffTransferTimeout(deadSheriffSeat);
+      });
+    }
+  }
+
+  /** 移交完成后执行的回调 */
+  private _afterSheriffTransfer: (() => void) | null = null;
+
+  /** Bug 51 修复：保存死亡警长的座位号，用于移交广播 */
+  private _deadSheriffSeat: number | null = null;
+
+  /**
+   * 提交警徽移交选择
+   */
+  submitSheriffTransfer(
+    playerId: string,
+    targetSeat: number,
+  ): { success: boolean; error?: string } {
+    if (this.state.phase !== 'SHERIFF_TRANSFER') {
+      return { success: false, error: '当前不在警徽移交阶段' };
+    }
+
+    // 校验目标合法性
+    const target = this.getPlayerBySeat(targetSeat);
+    if (!target || target.status !== 'alive') {
+      return { success: false, error: '移交目标不合法' };
+    }
+    if (target.isJudge) {
+      return { success: false, error: '不能移交给法官' };
+    }
+
+    // 执行移交
+    this.clearTimer('sheriff_transfer');
+    this.executeSheriffTransfer(targetSeat, false);
+
+    return { success: true };
+  }
+
+  /**
+   * 警徽移交超时处理：自动移交给场上存活的最小序号玩家
+   */
+  private resolveSheriffTransferTimeout(deadSheriffSeat: number): void {
+    const availableTargets = this.state.players
+      .filter((p) => p.status === 'alive' && !p.isJudge)
+      .map((p) => p.seatNumber)
+      .sort((a, b) => a - b);
+
+    if (availableTargets.length === 0) {
+      // 没有存活玩家可移交，跳过移交
+      this.logAction({
+        actorSeat: 0,
+        actorNickname: '系统',
+        actionType: 'SHERIFF_TRANSFER',
+        targetSeat: null,
+        targetNickname: null,
+        detail: { message: '警徽移交超时，无存活玩家可移交', isTimeout: true },
+      });
+      this.finishSheriffTransfer();
+      return;
+    }
+
+    // 移交给最小序号玩家
+    const autoTarget = availableTargets[0];
+    this.executeSheriffTransfer(autoTarget, true);
+  }
+
+  /**
+   * 执行警徽移交
+   */
+  private executeSheriffTransfer(targetSeat: number, isTimeout: boolean): void {
+    // 清除旧警长标记
+    for (const p of this.state.players) {
+      if (p.isSheriff) {
+        p.isSheriff = false;
+      }
+    }
+
+    // 设置新警长
+    const newSheriff = this.getPlayerBySeat(targetSeat);
+    if (newSheriff) {
+      newSheriff.isSheriff = true;
+    }
+
+    this.logAction({
+      actorSeat: 0,
+      actorNickname: '系统',
+      actionType: 'SHERIFF_TRANSFER',
+      targetSeat,
+      targetNickname: newSheriff?.nickname ?? null,
+      detail: {
+        toSeat: targetSeat,
+        toNickname: newSheriff?.nickname ?? '',
+        isTimeout,
+        message: isTimeout
+          ? `警徽移交超时，自动移交给 ${targetSeat}号 ${newSheriff?.nickname ?? ''}`
+          : `警徽移交给 ${targetSeat}号 ${newSheriff?.nickname ?? ''}`,
+      },
+    });
+
+    // 广播移交结果
+    // Bug 51 修复：使用保存的死亡警长座位号，而非错误的查找逻辑
+    this.onGameEvent(this.state.roomCode, 'SHERIFF_TRANSFER_RESULT', {
+      fromSeat: this._deadSheriffSeat ?? 0,
+      toSeat: targetSeat,
+      toNickname: newSheriff?.nickname ?? '',
+      isTimeout,
+    });
+
+    this.finishSheriffTransfer();
+  }
+
+  /**
+   * 完成警徽移交，执行后续流程
+   */
+  private finishSheriffTransfer(): void {
+    const afterTransfer = this._afterSheriffTransfer;
+    this._afterSheriffTransfer = null;
+
+    if (afterTransfer) {
+      afterTransfer();
+    }
+  }
+
+  /**
+   * 检查是否有警长在死亡名单中
+   * 返回死亡警长的座位号，如果没有则返回 null
+   */
+  private findDeadSheriffInNightDeaths(): number | null {
+    for (const death of this.state.nightDeaths) {
+      if (death.saved || death.overridden) continue;
+      const player = this.getPlayerBySeat(death.seatNumber);
+      if (player && player.isSheriff) {
+        return death.seatNumber;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * 检查白天出局的玩家是否为警长
+   */
+  private findDeadSheriffInDayDeaths(eliminated: number | null): number | null {
+    if (eliminated === null) return null;
+    const player = this.getPlayerBySeat(eliminated);
+    if (player && player.isSheriff) {
+      return eliminated;
+    }
+    return null;
   }
 
   /**
@@ -1399,22 +1986,52 @@ export class GameEngine {
       return { success: false, error: '当前不在发言阶段' };
     }
 
+    // 清除当前发言者的超时定时器和倒计时广播
+    this.clearTimer('speech');
+    this.clearSpeechCountdownTimer();
+
     this.state.currentSpeakerIndex++;
     this.skipUnavailableSpeakers();
 
     if (this.state.currentSpeakerIndex >= this.state.speechOrder.length) {
-      // 所有玩家发言完毕，进入投票阶段
-      this.clearTimer('speech');
-      this.enterDayVote();
+      // 所有玩家发言完毕，进入投票前等待阶段（骑士可发动技能）
+      this.enterPreVoteWait();
       return { success: true, finished: true };
     }
 
-    // SYSTEM 模式：设置下一位发言者的超时
-    if (this.state.gameMode === 'SYSTEM' && this.state.config.speechTimeout > 0) {
+    // 设置下一位发言者的超时
+    if (this.state.config.speechTimeout > 0) {
       this.setSpeechTimer();
     }
 
     return { success: true, finished: false };
+  }
+
+  /**
+   * 进入投票前等待阶段（Bug 4+6 修复）
+   * 所有发言结束后，等待 preVoteWaitTime 秒再进入投票
+   * 此阶段骑士可以发动决斗技能
+   */
+  private enterPreVoteWait(): void {
+    this.state.phase = 'PRE_VOTE_WAIT';
+    this.onPhaseChange('PRE_VOTE_WAIT', null, this.state.round);
+
+    const waitTime = this.state.config.preVoteWaitTime || 10;
+
+    this.logAction({
+      actorSeat: 0,
+      actorNickname: '系统',
+      actionType: 'PHASE_CHANGE',
+      targetSeat: null,
+      targetNickname: null,
+      detail: { phase: 'PRE_VOTE_WAIT', waitTime },
+    });
+
+    if (waitTime > 0) {
+      this.setTimer('pre_vote_wait', waitTime, () => {
+        this.enterDayVote();
+      });
+    }
   }
 
   /**
@@ -1426,8 +2043,8 @@ export class GameEngine {
 
     this.onPhaseChange('DAY_VOTE', null, this.state.round);
 
-    // SYSTEM 模式：设置投票超时
-    if (this.state.gameMode === 'SYSTEM' && this.state.config.voteTimeout > 0) {
+    // 设置投票超时
+    if (this.state.config.voteTimeout > 0) {
       this.setTimer('vote', this.state.config.voteTimeout, () => {
         this.resolveDayVote();
       });
@@ -1441,7 +2058,8 @@ export class GameEngine {
     playerId: string,
     targetSeat: number | null,
   ): { success: boolean; error?: string } {
-    if (this.state.phase !== 'DAY_VOTE') {
+    const isPK = this.state.phase === 'PK_VOTE';
+    if (this.state.phase !== 'DAY_VOTE' && !isPK) {
       return { success: false, error: '当前不在投票阶段' };
     }
 
@@ -1449,6 +2067,7 @@ export class GameEngine {
     if (!player) return { success: false, error: '玩家不存在' };
     if (player.status !== 'alive') return { success: false, error: '你已死亡，无法投票' };
     if (player.isJudge) return { success: false, error: '法官不参与投票' };
+    if (player.idiotRevealed) return { success: false, error: '白痴翻牌后失去投票权' };
 
     // 校验目标合法性
     if (targetSeat !== null) {
@@ -1458,6 +2077,10 @@ export class GameEngine {
       }
       if (targetSeat === player.seatNumber) {
         return { success: false, error: '不能投自己' };
+      }
+      // PK投票阶段：只能投给PK候选人
+      if (isPK && !this.state.pkCandidates.includes(targetSeat)) {
+        return { success: false, error: 'PK投票只能投给候选人' };
       }
     }
 
@@ -1469,17 +2092,27 @@ export class GameEngine {
       actionType: 'VOTE_CAST',
       targetSeat,
       targetNickname: targetSeat ? this.getPlayerBySeat(targetSeat)?.nickname || null : null,
-      detail: { isAbstain: targetSeat === null },
+      detail: {
+        isAbstain: targetSeat === null,
+        isPK,
+        voterSeat: player.seatNumber,
+        targetSeat,
+      },
     });
 
-    // 检查是否所有存活玩家都已投票
+    // 检查是否所有存活玩家都已投票（白痴翻牌后无投票权，跳过）
     const aliveNonJudge = this.state.players.filter(
-      (p) => p.status === 'alive' && !p.isJudge,
+      (p) => p.status === 'alive' && !p.isJudge && !p.idiotRevealed,
     );
     const allVoted = aliveNonJudge.every((p) => this.state.votes[p.seatNumber] !== undefined);
     if (allVoted) {
-      this.clearTimer('vote');
-      this.resolveDayVote();
+      if (isPK) {
+        this.clearTimer('pk_vote');
+        this.resolvePKVote();
+      } else {
+        this.clearTimer('vote');
+        this.resolveDayVote();
+      }
     }
 
     return { success: true };
@@ -1491,12 +2124,14 @@ export class GameEngine {
   private resolveDayVote(): void {
     const config = this.state.config;
 
-    // 统计票数
+    // 统计票数（警长按权重计票）
     const voteCount: Record<number, number> = {};
     for (const [voter, target] of Object.entries(this.state.votes)) {
       const targetSeat = Number(target);
       if (targetSeat > 0) {
-        voteCount[targetSeat] = (voteCount[targetSeat] || 0) + 1;
+        const voterPlayer = this.getPlayerBySeat(Number(voter));
+        const weight = voterPlayer?.isSheriff ? this.state.config.sheriffVoteWeight : 1;
+        voteCount[targetSeat] = (voteCount[targetSeat] || 0) + weight;
       }
     }
 
@@ -1536,9 +2171,19 @@ export class GameEngine {
     }
 
     if (isPK) {
+      // 广播投票结果（平票进入PK）
+      this.onVoteResult(
+        this.state.roomCode,
+        { ...this.state.votes },
+        null, // 平票无人出局
+        true, // isPK
+        candidates,
+      );
+
       // 进入PK投票
       this.state.phase = 'PK_VOTE';
       this.state.votes = {};
+      this.state.pkCandidates = candidates;
       this.logAction({
         actorSeat: 0,
         actorNickname: '系统',
@@ -1548,8 +2193,74 @@ export class GameEngine {
         detail: { pkCandidates: candidates, voteCount },
       });
       this.onPhaseChange('PK_VOTE', null, this.state.round);
+
+      // 设置PK投票超时
+      if (this.state.config.voteTimeout > 0) {
+        this.setTimer('pk_vote', this.state.config.voteTimeout, () => {
+          this.resolvePKVote();
+        });
+      }
+
       return;
     }
+
+    // 执行出局
+    this.executeDaySettlement(eliminated, 'vote_out');
+  }
+
+  /**
+   * 结算PK投票
+   * PK投票仅限候选人，再次平票则无人出局
+   */
+  private resolvePKVote(): void {
+    const pkCandidates = this.state.pkCandidates;
+
+    // 统计票数（警长按权重计票）
+    const voteCount: Record<number, number> = {};
+    for (const [voter, target] of Object.entries(this.state.votes)) {
+      const targetSeat = Number(target);
+      if (targetSeat > 0 && pkCandidates.includes(targetSeat)) {
+        const voterPlayer = this.getPlayerBySeat(Number(voter));
+        const weight = voterPlayer?.isSheriff ? this.state.config.sheriffVoteWeight : 1;
+        voteCount[targetSeat] = (voteCount[targetSeat] || 0) + weight;
+      }
+    }
+
+    // 找出最高票
+    let maxVotes = 0;
+    let winners: number[] = [];
+    for (const [seat, count] of Object.entries(voteCount)) {
+      if (count > maxVotes) {
+        maxVotes = count;
+        winners = [Number(seat)];
+      } else if (count === maxVotes) {
+        winners.push(Number(seat));
+      }
+    }
+
+    let eliminated: number | null = null;
+
+    if (winners.length === 1) {
+      eliminated = winners[0];
+    }
+    // PK再次平票，无人出局
+
+    this.logAction({
+      actorSeat: 0,
+      actorNickname: '系统',
+      actionType: 'VOTE_RESULT',
+      targetSeat: eliminated,
+      targetNickname: eliminated ? this.getPlayerBySeat(eliminated)?.nickname || null : null,
+      detail: {
+        voteDetails: this.state.votes,
+        eliminated,
+        isPK: true,
+        voteCounts: voteCount,
+      },
+    });
+
+    // 清除PK候选人
+    this.state.pkCandidates = [];
 
     // 执行出局
     this.executeDaySettlement(eliminated, 'vote_out');
@@ -1606,8 +2317,11 @@ export class GameEngine {
           // 毒封技能检查：如果被毒死且 poisonBlockGun 为 true，不能开枪
           const isPoisoned = player.deathCause === 'witch_poison';
           if (!(isPoisoned && config.poisonBlockGun)) {
-            // 猎人开枪逻辑由客户端提交目标，此处标记可开枪
-            // 实际开枪在 triggerHunterGun() 中处理
+            // 通知客户端猎人可以开枪
+            this.onGameEvent(this.state.roomCode, 'HUNTER_CAN_SHOOT', {
+              seatNumber: player.seatNumber,
+              nickname: player.nickname,
+            });
           }
         }
 
@@ -1616,7 +2330,11 @@ export class GameEngine {
           // 狼王被票出或被杀时可开枪（非自爆）
           const isPoisoned = player.deathCause === 'witch_poison';
           if (!(isPoisoned && config.poisonBlockGun)) {
-            // 狼王开枪逻辑由客户端提交目标
+            // 通知客户端狼王可以开枪
+            this.onGameEvent(this.state.roomCode, 'WOLF_KING_CAN_SHOOT', {
+              seatNumber: player.seatNumber,
+              nickname: player.nickname,
+            });
           }
         }
 
@@ -1647,10 +2365,12 @@ export class GameEngine {
     this.state.dayDeaths = dayDeaths;
 
     // 广播投票结果给客户端
+    // 白痴翻牌免死时，eliminated 应为 null（无人实际出局）
+    const actualEliminated = dayDeaths.length > 0 ? eliminated : null;
     this.onVoteResult(
       this.state.roomCode,
       { ...this.state.votes },
-      eliminated,
+      actualEliminated,
       false,
       [],
     );
@@ -1682,8 +2402,16 @@ export class GameEngine {
       targetSeat: eliminated,
       targetNickname: eliminated ? this.getPlayerBySeat(eliminated)?.nickname || null : null,
       detail: {
-        votes: this.state.votes,
+        voteDetails: this.state.votes,
         eliminated,
+        isPK: cause === 'vote_out' && this.state.pkCandidates.length > 0,
+        voteCounts: Object.values(this.state.votes).reduce<Record<number, number>>((acc, target) => {
+          const t = Number(target);
+          if (t > 0) {
+            acc[t] = (acc[t] || 0) + 1;
+          }
+          return acc;
+        }, {}),
         dayDeaths: dayDeaths.map((d) => ({ seat: d.seatNumber, cause: d.cause })),
       },
     });
@@ -1697,13 +2425,26 @@ export class GameEngine {
 
     this.onPhaseChange('DAY_SETTLEMENT', null, this.state.round);
 
-    // SYSTEM 模式：自动进入下一夜
-    if (this.state.gameMode === 'SYSTEM') {
-      this.setTimer('day_settlement', 3, () => {
+    // 检查白天出局者是否为警长
+    const dayDeadSheriff = this.findDeadSheriffInDayDeaths(actualEliminated);
+
+    // 所有模式：进入入夜前等待阶段（给予技能发动时间）
+    this.state.phase = 'PRE_NIGHT';
+    this.onPhaseChange('PRE_NIGHT', null, this.state.round);
+    // 使用可配置的技能发动等待时间，而非固定5秒
+    const preNightWait = this.state.config.skillActivationTimeout || 15;
+    this.setTimer('pre_night', preNightWait, () => {
+      if (dayDeadSheriff !== null) {
+        // 警长白天死亡，先进行警徽移交再入夜
+        this.enterSheriffTransfer(dayDeadSheriff, () => {
+          this.state.round++;
+          this.enterNightPhase();
+        });
+      } else {
         this.state.round++;
         this.enterNightPhase();
-      });
-    }
+      }
+    });
   }
 
   // ==========================================================================
@@ -1728,9 +2469,9 @@ export class GameEngine {
     targetSeat: number,
   ): { success: boolean; error?: string; result?: { targetIsWolf: boolean; knightDied: boolean; forceNight: boolean; revealedRole?: RoleId } } {
     // ---- 校验 ----
-    // 规则六：骑士决斗只能在白天发言阶段发动
-    if (!['DAY_SPEECH'].includes(this.state.phase)) {
-      return { success: false, error: '决斗只能在白天发言阶段发动' };
+    // 规则六：骑士决斗只能在白天发言阶段或投票前等待阶段发动
+    if (!['DAY_SPEECH', 'PRE_VOTE_WAIT'].includes(this.state.phase)) {
+      return { success: false, error: '决斗只能在白天发言阶段或投票前等待阶段发动' };
     }
 
     const knight = this.getPlayerById(knightPlayerId);
@@ -1830,12 +2571,14 @@ export class GameEngine {
       this.state.round++;
       this.enterNightPhase();
     } else {
-      // 继续白天流程（恢复到中断前的阶段）
+      // Bug 53 说明：继续白天流程（恢复到中断前的阶段）
+      // interruptDayPhase() 将 phase 设为 DAY_INTERRUPT 并清除定时器
+      // 这里恢复到原阶段并重新设置定时器，中断状态已完全清理
       this.state.phase = interruptedPhase;
       this.onPhaseChange(interruptedPhase, null, this.state.round);
 
       // 恢复发言阶段的定时器
-      if (interruptedPhase === 'DAY_SPEECH' && this.state.gameMode === 'SYSTEM' && this.state.config.speechTimeout > 0) {
+      if (interruptedPhase === 'DAY_SPEECH' && this.state.config.speechTimeout > 0) {
         this.setSpeechTimer();
       }
     }
@@ -1855,7 +2598,7 @@ export class GameEngine {
     targetSeat: number,
   ): { success: boolean; error?: string } {
     // ---- 校验 ----
-    if (!['DAY_SPEECH', 'DAY_VOTE'].includes(this.state.phase)) {
+    if (!['DAY_SPEECH', 'PRE_VOTE_WAIT', 'DAY_VOTE'].includes(this.state.phase)) {
       return { success: false, error: '自爆只能在白天阶段发动' };
     }
 
@@ -2058,6 +2801,23 @@ export class GameEngine {
       detail: {},
     });
 
+    // 连锁触发：如果猎人打死的是狼王，狼王也可以开枪
+    if (target.role === 'wolf_king' && !target.wolfKingGunFired) {
+      this.onGameEvent(this.state.roomCode, 'WOLF_KING_CAN_SHOOT', {
+        seatNumber: target.seatNumber,
+        nickname: target.nickname,
+      });
+    }
+
+    // 广播死亡事件给所有客户端
+    this.onGameEvent(this.state.roomCode, 'PLAYER_KILLED_BY_GUN', {
+      seatNumber: target.seatNumber,
+      nickname: target.nickname,
+      killedBy: hunter.seatNumber,
+      killedByNickname: hunter.nickname,
+      cause: 'hunter_gun',
+    });
+
     // 检查胜负
     const winner = this.checkWinCondition();
     if (winner) {
@@ -2100,6 +2860,23 @@ export class GameEngine {
       targetSeat,
       targetNickname: target.nickname,
       detail: {},
+    });
+
+    // 连锁触发：如果狼王打死的是猎人，猎人也可以开枪
+    if (target.role === 'hunter' && !target.hunterGunFired) {
+      this.onGameEvent(this.state.roomCode, 'HUNTER_CAN_SHOOT', {
+        seatNumber: target.seatNumber,
+        nickname: target.nickname,
+      });
+    }
+
+    // 广播死亡事件给所有客户端
+    this.onGameEvent(this.state.roomCode, 'PLAYER_KILLED_BY_GUN', {
+      seatNumber: target.seatNumber,
+      nickname: target.nickname,
+      killedBy: wolfKing.seatNumber,
+      killedByNickname: wolfKing.nickname,
+      cause: 'wolf_king_gun',
     });
 
     // 检查胜负
@@ -2310,6 +3087,15 @@ export class GameEngine {
       case 'LOBBY':
         this.startGame();
         break;
+      case 'ROLE_REVEAL':
+        this.clearTimer('role_reveal');
+        this.enterNightPhase();
+        break;
+      case 'PRE_NIGHT':
+        this.clearTimer('pre_night');
+        this.state.round++;
+        this.enterNightPhase();
+        break;
       case 'NIGHT':
         // 强制完成当前夜间子阶段，推进到下一个
         if (this.state.nightSubPhase) {
@@ -2322,11 +3108,55 @@ export class GameEngine {
       case 'NIGHT_SETTLEMENT':
         this.enterDayAnnounce();
         break;
+      case 'DAY_ANNOUNCE':
+        this.clearTimer('day_announce');
+        {
+          const deadSheriff = this.findDeadSheriffInNightDeaths();
+          if (deadSheriff !== null) {
+            this.enterSheriffTransfer(deadSheriff, () => {
+              if (this.state.round === 1 && this.state.config.sheriffElectionEnabled) {
+                this.enterSheriffElection();
+              } else {
+                this.enterDaySpeech();
+              }
+            });
+          } else if (this.state.round === 1 && this.state.config.sheriffElectionEnabled) {
+            this.enterSheriffElection();
+          } else {
+            this.enterDaySpeech();
+          }
+        }
+        break;
       case 'DAY_SPEECH':
+        // 发言阶段：强制推进到下一位发言者，而非直接跳到投票
+        this.nextSpeaker();
+        break;
+      case 'PRE_VOTE_WAIT':
+        // 投票前等待：跳过等待直接进入投票
+        this.clearTimer('pre_vote_wait');
         this.enterDayVote();
         break;
       case 'DAY_VOTE':
         this.resolveDayVote();
+        break;
+      case 'SHERIFF_ELECTION':
+        this.clearTimer('sheriff_election');
+        this.resolveSheriffElection();
+        break;
+      case 'SHERIFF_TRANSFER':
+        this.clearTimer('sheriff_transfer');
+        // 超时自动移交给最小序号
+        {
+          const availableTargets = this.state.players
+            .filter((p) => p.status === 'alive' && !p.isJudge)
+            .map((p) => p.seatNumber)
+            .sort((a, b) => a - b);
+          if (availableTargets.length > 0) {
+            this.executeSheriffTransfer(availableTargets[0], true);
+          } else {
+            this.finishSheriffTransfer();
+          }
+        }
         break;
       case 'DAY_SETTLEMENT':
         this.state.round++;
@@ -2338,9 +3168,8 @@ export class GameEngine {
         this.onPhaseChange('DAY_SPEECH', null, this.state.round);
         break;
       case 'PK_VOTE':
-        // PK投票后继续白天结算
-        this.state.phase = 'DAY_SETTLEMENT';
-        this.onPhaseChange('DAY_SETTLEMENT', null, this.state.round);
+        this.clearTimer('pk_vote');
+        this.resolvePKVote();
         break;
       case 'GAME_OVER':
         return { success: false, error: '游戏已结束' };
@@ -2366,6 +3195,19 @@ export class GameEngine {
     }
 
     this.state.isPaused = true;
+    this.pausedPhaseRemainingTime = null;
+    this.pausedPhaseTimerName = null;
+    this.pausedPhaseTimerCallback = null;
+    const currentPhaseTimerName = this.getCurrentPhaseTimerName();
+    if (currentPhaseTimerName) {
+      const deadline = this.timerDeadlines.get(currentPhaseTimerName);
+      const callback = this.timerCallbacks.get(currentPhaseTimerName);
+      if (deadline && callback) {
+        this.pausedPhaseRemainingTime = Math.max(1, deadline - Date.now());
+        this.pausedPhaseTimerName = currentPhaseTimerName;
+        this.pausedPhaseTimerCallback = callback;
+      }
+    }
     this.clearAllTimers();
 
     this.logAction({
@@ -2397,6 +3239,31 @@ export class GameEngine {
     }
 
     this.state.isPaused = false;
+    if (this.pausedPhaseRemainingTime !== null && this.pausedPhaseTimerName && this.pausedPhaseTimerCallback) {
+      const remainingMs = this.pausedPhaseRemainingTime;
+      const timerName = this.pausedPhaseTimerName;
+      const callback = this.pausedPhaseTimerCallback;
+      this.timerDeadlines.set(timerName, Date.now() + remainingMs);
+      this.timerCallbacks.set(timerName, callback);
+      this.timers.set(timerName, setTimeout(callback, remainingMs));
+      if (this.state.phase === 'NIGHT') {
+        this.nightActionStartTime = Date.now();
+      }
+
+      // 恢复倒计时广播
+      const remainingSeconds = Math.ceil(remainingMs / 1000);
+      if (this.state.phase === 'NIGHT' && this.state.nightSubPhase?.currentRole) {
+        // 夜晚阶段：恢复夜间倒计时广播
+        this.startNightCountdownBroadcast(this.state.nightSubPhase.currentRole, remainingSeconds);
+      } else if (this.state.phase === 'DAY_SPEECH' && this.state.speechOrder.length > 0) {
+        // 发言阶段：恢复发言倒计时广播
+        const currentSpeakerSeat = this.state.speechOrder[this.state.currentSpeakerIndex] ?? 0;
+        this.startSpeechCountdownBroadcast(currentSpeakerSeat, remainingSeconds);
+      }
+    }
+    this.pausedPhaseRemainingTime = null;
+    this.pausedPhaseTimerName = null;
+    this.pausedPhaseTimerCallback = null;
 
     this.logAction({
       actorSeat: judge.seatNumber,
@@ -2423,30 +3290,11 @@ export class GameEngine {
     const guard = this.guardNightJudgeOperation('JUDGE');
     if (!guard.allowed) return { success: false, error: guard.error };
 
-    this.state.isPaused = !this.state.isPaused;
-
     if (this.state.isPaused) {
-      this.clearAllTimers();
-      this.logAction({
-        actorSeat: judge.seatNumber,
-        actorNickname: judge.nickname,
-        actionType: 'JUDGE_PAUSE',
-        targetSeat: null,
-        targetNickname: null,
-        detail: {},
-      });
+      return this.resumeGame(judgeId);
     } else {
-      this.logAction({
-        actorSeat: judge.seatNumber,
-        actorNickname: judge.nickname,
-        actionType: 'JUDGE_RESUME',
-        targetSeat: null,
-        targetNickname: null,
-        detail: {},
-      });
+      return this.pauseGame(judgeId);
     }
-
-    return { success: true, isPaused: this.state.isPaused };
   }
 
   /**
@@ -2516,6 +3364,39 @@ export class GameEngine {
     return this.nextSpeaker();
   }
 
+  /**
+   * 当前发言者主动结束发言
+   */
+  finishSpeech(
+    playerId: string,
+  ): { success: boolean; error?: string } {
+    if (this.state.phase !== 'DAY_SPEECH') {
+      return { success: false, error: '当前不在发言阶段' };
+    }
+
+    const player = this.getPlayerById(playerId);
+    if (!player) {
+      return { success: false, error: '玩家不存在' };
+    }
+
+    const currentSpeakerSeat = this.state.speechOrder[this.state.currentSpeakerIndex] ?? null;
+    if (currentSpeakerSeat === null || player.seatNumber !== currentSpeakerSeat) {
+      return { success: false, error: '当前不是你的发言回合' };
+    }
+
+    this.logAction({
+      actorSeat: player.seatNumber,
+      actorNickname: player.nickname,
+      actionType: 'SPEECH_FINISH',
+      targetSeat: null,
+      targetNickname: null,
+      detail: {},
+    });
+
+    this.nextSpeaker();
+    return { success: true };
+  }
+
   // ==========================================================================
   // 第八部分：胜负判定
   // ==========================================================================
@@ -2537,6 +3418,12 @@ export class GameEngine {
       (p) => p.status === 'alive' && !p.isJudge,
     );
 
+    // Bug 58 说明：隐狼和机械狼的阵营判定
+    // 隐狼（hidden_wolf）在 ROLE_META 中 faction 为 'evil'，这是正确的：
+    // 1. 隐狼虽然被查验为好人，但实际上是狼人阵营
+    // 2. 如果所有显性狼人死光但隐狼存活，狼人阵营仍有存活者，游戏继续
+    // 3. 隐狼行动后（hiddenWolfHasActed = true）会暴露身份，但阵营判定不变
+    // 机械狼（mechanical_wolf）同理，无论模仿什么角色，阵营始终为 evil
     const aliveGood = alivePlayers.filter((p) => !isEvilRole(p.role));
     const aliveEvil = alivePlayers.filter((p) => isEvilRole(p.role));
 
@@ -2675,11 +3562,20 @@ export class GameEngine {
 
   private setTimer(name: string, seconds: number, callback: () => void): void {
     this.clearTimer(name);
+    this.timerDeadlines.set(name, Date.now() + seconds * 1000);
+    this.timerCallbacks.set(name, callback);
     this.timers.set(name, setTimeout(callback, seconds * 1000));
   }
 
   private setNightActionTimer(roleId: RoleId, seconds: number): void {
+    this.nightActionStartTime = Date.now();
     this.setTimer(`night_${roleId}`, seconds, () => {
+      // 防护：如果当前已不在夜间阶段（可能已被共识/其他路径推进），忽略孤儿定时器
+      if (this.state.phase !== 'NIGHT') return;
+
+      // 防护：如果当前子阶段已不匹配此定时器（可能已被共识/其他路径推进），忽略孤儿定时器
+      if (this.state.nightSubPhase?.currentRole !== roleId) return;
+
       // 超时处理：根据角色不同采取不同策略
       this.logAction({
         actorSeat: 0,
@@ -2690,6 +3586,19 @@ export class GameEngine {
         detail: { roleId, phase: 'NIGHT', reason: '夜间行动超时' },
       });
 
+      // 清除倒计时广播定时器
+      this.clearNightCountdownTimer(roleId);
+
+      // 被恐惧封印的阶段：不执行任何行动，直接推进到下一个子阶段
+      if (this.state.nightSubPhase?.isBlockedByNightmare) {
+        const nextIndex = this.state.nightSubPhase.currentRoleIndex + 1;
+        this.advanceNightSubPhase(nextIndex);
+        return;
+      }
+
+      // 夜间行动超时始终自动推进（无论游戏模式）
+      // 超时策略：狼人以多数票/最小号/随机选人，预言家/守卫/机械狼/噩梦随机选人，女巫不释放技能
+
       if (roleId === 'werewolf') {
         // 狼人投票超时：系统随机选择一名存活玩家作为刀人目标
         this.handleWolfVoteTimeout();
@@ -2697,14 +3606,17 @@ export class GameEngine {
         // 女巫超时：放弃操作（不解人不毒人）
         this.handleWitchTimeout();
       } else if (roleId === 'guard') {
-        // 守卫超时：放弃操作（不守护任何人）
+        // 守卫超时：随机选择除自身外的一名存活玩家作为守护目标
         this.handleGuardTimeout();
       } else if (roleId === 'nightmare_shadow') {
-        // 噩梦之影超时：系统随机选择一名存活玩家进行恐惧
+        // 噩梦之影超时：系统随机选择一名存活好人玩家进行恐惧
         this.handleNightmareTimeout();
       } else if (roleId === 'seer') {
-        // 预言家超时：系统随机选择一名存活玩家进行查验
+        // 预言家超时：系统随机选择除自身外的一名存活玩家进行查验
         this.handleSeerTimeout();
+      } else if (roleId === 'mechanical_wolf') {
+        // 机械狼超时：随机选择除自身外的一名存活玩家作为模仿/技能目标
+        this.handleMechanicalWolfTimeout();
       } else {
         // 其他角色：直接跳过
         if (this.state.nightSubPhase) {
@@ -2713,6 +3625,37 @@ export class GameEngine {
         }
       }
     });
+
+    // 启动倒计时广播定时器：每秒向所有客户端推送剩余时间
+    this.startNightCountdownBroadcast(roleId, seconds);
+  }
+
+  /**
+   * 启动夜间倒计时广播：每秒推送剩余时间
+   */
+  private startNightCountdownBroadcast(roleId: RoleId, totalSeconds: number): void {
+    this.clearNightCountdownTimer(roleId);
+    let remaining = totalSeconds;
+    const timerName = `night_countdown_${roleId}`;
+    const tick = () => {
+      remaining--;
+      if (remaining <= 0) {
+        this.clearNightCountdownTimer(roleId);
+        return;
+      }
+      this.onNightCountdown(this.state.roomCode, roleId, remaining);
+      this.timers.set(timerName, setTimeout(tick, 1000));
+    };
+    // 立即广播初始总时间
+    this.onNightCountdown(this.state.roomCode, roleId, remaining);
+    this.timers.set(timerName, setTimeout(tick, 1000));
+  }
+
+  /**
+   * 清除夜间倒计时广播定时器
+   */
+  private clearNightCountdownTimer(roleId: RoleId): void {
+    this.clearTimer(`night_countdown_${roleId}`);
   }
 
   /**
@@ -2720,6 +3663,13 @@ export class GameEngine {
    * 规则：多数票优先，票数相同取最小座位号；无人投票则随机选择
    */
   private handleWolfVoteTimeout(): void {
+    // 防护：如果当前已不在狼人子阶段（可能已被共识推进），直接跳过
+    if (this.state.phase !== 'NIGHT' ||
+        !this.state.nightSubPhase ||
+        this.state.nightSubPhase.currentRole !== 'werewolf') {
+      return;
+    }
+
     const votes = this.state.wolfVotes;
     const voteValues = Object.values(votes);
 
@@ -2756,9 +3706,9 @@ export class GameEngine {
         },
       });
     } else {
-      // 无人投票，随机选择
+      // 无人投票，随机选择除狼人阵营外的任意一名存活玩家
       const alivePlayers = this.state.players.filter(
-        (p) => !p.isJudge && p.status === 'alive',
+        (p) => !p.isJudge && p.status === 'alive' && !isEvilRole(p.role),
       );
 
       if (alivePlayers.length === 0) {
@@ -2781,6 +3731,16 @@ export class GameEngine {
       });
     }
 
+    // 记录狼人夜间行动到 nightActions（供 DTO / MyActionInfo 使用）
+    this.state.nightActions['werewolf'] = {
+      roleId: 'werewolf',
+      actorSeat: 0, // 系统代为执行
+      targetSeat: this.state.werewolfTarget,
+      extra: { killTarget: this.state.werewolfTarget },
+      submitted: true,
+      blockedByNightmare: false,
+    };
+
     // 通知投票更新
     this.onWolfVoteUpdate(
       this.state.roomCode,
@@ -2800,6 +3760,13 @@ export class GameEngine {
    * 女巫超时处理：放弃操作
    */
   private handleWitchTimeout(): void {
+    // 防护：如果当前不在女巫子阶段，忽略
+    if (this.state.phase !== 'NIGHT' ||
+        !this.state.nightSubPhase ||
+        this.state.nightSubPhase.currentRole !== 'witch') {
+      return;
+    }
+
     this.logAction({
       actorSeat: 0,
       actorNickname: '系统',
@@ -2825,26 +3792,79 @@ export class GameEngine {
   }
 
   /**
-   * 守卫超时处理：放弃操作
+   * 守卫超时处理：随机选择除自身外的一名存活玩家作为守护目标
+   * 需排除守护历史中已守护过的玩家（不可重复守护同一人）
    */
   private handleGuardTimeout(): void {
-    this.logAction({
-      actorSeat: 0,
-      actorNickname: '系统',
-      actionType: 'NIGHT_ACTION_SUBMIT',
-      targetSeat: null,
-      targetNickname: null,
-      detail: { roleId: 'guard', message: '守卫超时，放弃操作' },
-    });
+    // 防护：如果当前不在守卫子阶段，忽略
+    if (this.state.phase !== 'NIGHT' ||
+        !this.state.nightSubPhase ||
+        this.state.nightSubPhase.currentRole !== 'guard') {
+      return;
+    }
 
-    this.state.nightActions['guard'] = {
-      roleId: 'guard',
-      actorSeat: this.state.players.find((p) => p.role === 'guard' && p.status === 'alive')?.seatNumber ?? 0,
-      targetSeat: null,
-      extra: {},
-      submitted: true,
-      blockedByNightmare: false,
-    };
+    const guard = this.state.players.find((p) => p.role === 'guard' && p.status === 'alive');
+    if (!guard) {
+      if (this.state.nightSubPhase) {
+        const nextIndex = this.state.nightSubPhase.currentRoleIndex + 1;
+        this.advanceNightSubPhase(nextIndex);
+      }
+      return;
+    }
+
+    const alivePlayers = this.state.players.filter(
+      (p) => !p.isJudge && p.status === 'alive' && p.seatNumber !== guard.seatNumber,
+    );
+    // 排除已守护过的玩家（不可重复守护同一人）
+    const validTargets = alivePlayers.filter(
+      (p) => !guard.guardProtectedHistory.includes(p.seatNumber),
+    );
+
+    if (validTargets.length > 0) {
+      const randomTarget = validTargets[Math.floor(Math.random() * validTargets.length)];
+      this.state.guardProtectTarget = randomTarget.seatNumber;
+      guard.guardLastProtected = randomTarget.seatNumber;
+      if (!guard.guardProtectedHistory.includes(randomTarget.seatNumber)) {
+        guard.guardProtectedHistory.push(randomTarget.seatNumber);
+      }
+
+      this.state.nightActions['guard'] = {
+        roleId: 'guard',
+        actorSeat: guard.seatNumber,
+        targetSeat: randomTarget.seatNumber,
+        extra: { protectTarget: randomTarget.seatNumber },
+        submitted: true,
+        blockedByNightmare: false,
+      };
+
+      this.logAction({
+        actorSeat: 0,
+        actorNickname: '系统',
+        actionType: 'NIGHT_ACTION_SUBMIT',
+        targetSeat: randomTarget.seatNumber,
+        targetNickname: randomTarget.nickname,
+        detail: { roleId: 'guard', message: '守卫超时，系统随机选择守护目标' },
+      });
+    } else {
+      // 无合法目标（所有其他玩家都被守护过），放弃操作
+      this.state.nightActions['guard'] = {
+        roleId: 'guard',
+        actorSeat: guard.seatNumber,
+        targetSeat: null,
+        extra: {},
+        submitted: true,
+        blockedByNightmare: false,
+      };
+
+      this.logAction({
+        actorSeat: 0,
+        actorNickname: '系统',
+        actionType: 'NIGHT_ACTION_SUBMIT',
+        targetSeat: null,
+        targetNickname: null,
+        detail: { roleId: 'guard', message: '守卫超时且无合法目标，放弃操作' },
+      });
+    }
 
     if (this.state.nightSubPhase) {
       const nextIndex = this.state.nightSubPhase.currentRoleIndex + 1;
@@ -2853,19 +3873,45 @@ export class GameEngine {
   }
 
   /**
-   * 噩梦之影超时处理：系统随机选择一名存活玩家进行恐惧
+   * 噩梦之影超时处理：系统随机选择除自身外的一名存活好人玩家进行恐惧
    */
   private handleNightmareTimeout(): void {
-    const alivePlayers = this.state.players.filter(
-      (p) => !p.isJudge && p.status === 'alive' && !isEvilRole(p.role),
+    // 防护：如果当前不在噩梦之影子阶段，忽略
+    if (this.state.phase !== 'NIGHT' ||
+        !this.state.nightSubPhase ||
+        this.state.nightSubPhase.currentRole !== 'nightmare_shadow') {
+      return;
+    }
+
+    const nightmare = this.state.players.find((p) => p.role === 'nightmare_shadow' && p.status === 'alive');
+    // 噩梦可以恐惧任何阵营角色（包括狼人阵营），排除自己、法官和已恐惧过的
+    const aliveFearablePlayers = this.state.players.filter(
+      (p) => !p.isJudge && p.status === 'alive' &&
+        (nightmare ? p.seatNumber !== nightmare.seatNumber : true) &&
+        (nightmare ? !nightmare.nightmareTargetHistory.includes(p.seatNumber) : true),
     );
 
-    if (alivePlayers.length > 0) {
-      const randomTarget = alivePlayers[Math.floor(Math.random() * alivePlayers.length)];
+    if (aliveFearablePlayers.length > 0 && nightmare) {
+      const randomTarget = aliveFearablePlayers[Math.floor(Math.random() * aliveFearablePlayers.length)];
       this.state.nightmareTarget = randomTarget.seatNumber;
 
-      // 恐惧效果始终当夜生效（规则七：全技能封禁当夜）
+      // 记录恐惧历史
+      if (!nightmare.nightmareTargetHistory.includes(randomTarget.seatNumber)) {
+        nightmare.nightmareTargetHistory.push(randomTarget.seatNumber);
+      }
+
+      // 恐惧当夜立即生效（规则七：全技能封禁当夜）
       this.applyNightmareEffect(randomTarget.seatNumber);
+
+      // 记录夜间行动
+      this.state.nightActions['nightmare_shadow'] = {
+        roleId: 'nightmare_shadow',
+        actorSeat: nightmare.seatNumber,
+        targetSeat: randomTarget.seatNumber,
+        extra: {},
+        submitted: true,
+        blockedByNightmare: false,
+      };
 
       this.logAction({
         actorSeat: 0,
@@ -2884,19 +3930,46 @@ export class GameEngine {
   }
 
   /**
-   * 预言家超时处理：系统随机选择一名存活玩家进行查验
+   * 预言家超时处理：系统随机选择除自身外的一名存活玩家进行查验
    */
   private handleSeerTimeout(): void {
+    // 防护：如果当前不在预言家子阶段，忽略
+    if (this.state.phase !== 'NIGHT' ||
+        !this.state.nightSubPhase ||
+        this.state.nightSubPhase.currentRole !== 'seer') {
+      return;
+    }
+
     const seer = this.state.players.find((p) => p.role === 'seer' && p.status === 'alive');
+    if (!seer) {
+      if (this.state.nightSubPhase) {
+        const nextIndex = this.state.nightSubPhase.currentRoleIndex + 1;
+        this.advanceNightSubPhase(nextIndex);
+      }
+      return;
+    }
+
     const alivePlayers = this.state.players.filter(
-      (p) => !p.isJudge && p.status === 'alive' && p.role !== 'seer',
+      (p) => !p.isJudge && p.status === 'alive' && p.seatNumber !== seer.seatNumber,
     );
 
-    if (alivePlayers.length > 0 && seer) {
+    if (alivePlayers.length > 0) {
       const randomTarget = alivePlayers[Math.floor(Math.random() * alivePlayers.length)];
       const seerResult: Faction = isHiddenWolf(randomTarget.role)
         ? (randomTarget.hiddenWolfHasActed ? 'evil' : 'good')
-        : ROLE_META[randomTarget.role].faction;
+        : (randomTarget.role === 'mechanical_wolf'
+          ? this.getMechanicalWolfSeerResult(randomTarget)
+          : ROLE_META[randomTarget.role].faction);
+
+      // 记录夜间行动（含查验结果），供 DTO 展示
+      this.state.nightActions['seer'] = {
+        roleId: 'seer',
+        actorSeat: seer.seatNumber,
+        targetSeat: randomTarget.seatNumber,
+        extra: { seerResult },
+        submitted: true,
+        blockedByNightmare: false,
+      };
 
       this.logAction({
         actorSeat: 0,
@@ -2914,9 +3987,102 @@ export class GameEngine {
     }
   }
 
+  /**
+   * 机械狼超时处理：随机选择除自身外的一名存活玩家作为模仿/技能目标
+   *
+   * - selecting 阶段：随机选择模仿目标 → 进入 learning 阶段
+   * - active 阶段：随机选择技能目标 → 进入 silent 阶段
+   */
+  private handleMechanicalWolfTimeout(): void {
+    // 防护：如果当前不在机械狼子阶段，忽略
+    if (this.state.phase !== 'NIGHT' ||
+        !this.state.nightSubPhase ||
+        this.state.nightSubPhase.currentRole !== 'mechanical_wolf') {
+      return;
+    }
+
+    const mwPlayer = this.state.players.find(
+      (p) => p.role === 'mechanical_wolf' && p.status === 'alive',
+    );
+    if (!mwPlayer) {
+      if (this.state.nightSubPhase) {
+        const nextIndex = this.state.nightSubPhase.currentRoleIndex + 1;
+        this.advanceNightSubPhase(nextIndex);
+      }
+      return;
+    }
+
+    const alivePlayers = this.state.players.filter(
+      (p) => !p.isJudge && p.status === 'alive' && p.seatNumber !== mwPlayer.seatNumber,
+    );
+
+    if (mwPlayer.mechanicalWolfPhase === 'selecting' && alivePlayers.length > 0) {
+      // selecting 阶段：随机选择模仿目标
+      const randomTarget = alivePlayers[Math.floor(Math.random() * alivePlayers.length)];
+      mwPlayer.mechanicalWolfImitateTarget = randomTarget.seatNumber;
+      mwPlayer.mechanicalWolfPhase = 'learning';
+
+      this.state.nightActions['mechanical_wolf'] = {
+        roleId: 'mechanical_wolf',
+        actorSeat: mwPlayer.seatNumber,
+        targetSeat: randomTarget.seatNumber,
+        extra: { imitateTarget: randomTarget.seatNumber, phase: 'selecting' },
+        submitted: true,
+        blockedByNightmare: false,
+      };
+
+      this.logAction({
+        actorSeat: 0,
+        actorNickname: '系统',
+        actionType: 'NIGHT_ACTION_SUBMIT',
+        targetSeat: randomTarget.seatNumber,
+        targetNickname: randomTarget.nickname,
+        detail: {
+          roleId: 'mechanical_wolf',
+          message: '机械狼超时，系统随机选择模仿目标',
+          phase: 'selecting',
+        },
+      });
+    } else if (mwPlayer.mechanicalWolfPhase === 'active' && alivePlayers.length > 0) {
+      // active 阶段：随机选择技能目标
+      const randomTarget = alivePlayers[Math.floor(Math.random() * alivePlayers.length)];
+      mwPlayer.mechanicalWolfPhase = 'silent';
+      mwPlayer.mechanicalWolfSkillDeferred = false;
+
+      this.state.nightActions['mechanical_wolf'] = {
+        roleId: 'mechanical_wolf',
+        actorSeat: mwPlayer.seatNumber,
+        targetSeat: randomTarget.seatNumber,
+        extra: { imitateSkillTarget: randomTarget.seatNumber, phase: 'active' },
+        submitted: true,
+        blockedByNightmare: false,
+      };
+
+      this.logAction({
+        actorSeat: 0,
+        actorNickname: '系统',
+        actionType: 'NIGHT_ACTION_SUBMIT',
+        targetSeat: randomTarget.seatNumber,
+        targetNickname: randomTarget.nickname,
+        detail: {
+          roleId: 'mechanical_wolf',
+          message: '机械狼超时，系统随机选择技能目标',
+          phase: 'active',
+        },
+      });
+    }
+
+    if (this.state.nightSubPhase) {
+      const nextIndex = this.state.nightSubPhase.currentRoleIndex + 1;
+      this.advanceNightSubPhase(nextIndex);
+    }
+  }
+
   private setSpeechTimer(): void {
     if (this.state.config.speechTimeout <= 0) return;
     this.setTimer('speech', this.state.config.speechTimeout, () => {
+      // 清除发言倒计时广播
+      this.clearSpeechCountdownTimer();
       this.logAction({
         actorSeat: 0,
         actorNickname: '系统',
@@ -2927,6 +4093,64 @@ export class GameEngine {
       });
       this.nextSpeaker();
     });
+
+    // 启动发言倒计时广播：每秒向所有客户端推送剩余时间
+    const currentSpeakerSeat = this.state.speechOrder[this.state.currentSpeakerIndex] ?? 0;
+    this.startSpeechCountdownBroadcast(currentSpeakerSeat, this.state.config.speechTimeout);
+  }
+
+  /**
+   * 启动发言倒计时广播：每秒推送剩余时间
+   */
+  private startSpeechCountdownBroadcast(seatNumber: number, totalSeconds: number): void {
+    this.clearSpeechCountdownTimer();
+    let remaining = totalSeconds;
+    const timerName = 'speech_countdown';
+    const tick = () => {
+      remaining--;
+      if (remaining <= 0) {
+        this.clearSpeechCountdownTimer();
+        return;
+      }
+      this.onSpeechCountdown(this.state.roomCode, seatNumber, remaining);
+      this.timers.set(timerName, setTimeout(tick, 1000));
+    };
+    // 立即广播初始总时间
+    this.onSpeechCountdown(this.state.roomCode, seatNumber, remaining);
+    this.timers.set(timerName, setTimeout(tick, 1000));
+  }
+
+  /**
+   * 清除发言倒计时广播定时器
+   */
+  private clearSpeechCountdownTimer(): void {
+    this.clearTimer('speech_countdown');
+  }
+
+  private getCurrentPhaseTimerName(): string | null {
+    if (this.state.phase === 'NIGHT' && this.state.nightSubPhase?.currentRole) {
+      const roleId = this.state.nightSubPhase.currentRole;
+      if (this.timers.has(`night_${roleId}`)) return `night_${roleId}`;
+      if (this.timers.has('dead_role_auto_advance')) return 'dead_role_auto_advance';
+      if (this.timers.has('blocked_auto_advance')) return 'blocked_auto_advance';
+      if (this.timers.has('guard_skip')) return 'guard_skip';
+      return null;
+    }
+
+    const phaseTimerMap: Partial<Record<GamePhase, string>> = {
+      ROLE_REVEAL: 'role_reveal',
+      DAY_ANNOUNCE: 'day_announce',
+      DAY_SPEECH: 'speech',
+      PRE_VOTE_WAIT: 'pre_vote_wait',
+      DAY_VOTE: 'vote',
+      PK_VOTE: 'pk_vote',
+      SHERIFF_ELECTION: 'sheriff_election',
+      SHERIFF_TRANSFER: 'sheriff_transfer',
+      PRE_NIGHT: 'pre_night',
+    };
+
+    const timerName = phaseTimerMap[this.state.phase];
+    return timerName && this.timers.has(timerName) ? timerName : null;
   }
 
   private clearTimer(name: string): void {
@@ -2935,13 +4159,20 @@ export class GameEngine {
       clearTimeout(timer);
       this.timers.delete(name);
     }
+    this.timerDeadlines.delete(name);
+    this.timerCallbacks.delete(name);
   }
 
+  // Bug 55 说明：clearAllTimers 会清除所有通过 setTimer 创建的定时器
+  // 所有定时器都通过 setTimer 方法创建并存储在 this.timers Map 中
+  // 因此 clearAllTimers 能够完整清理所有定时器
   private clearAllTimers(): void {
     for (const timer of this.timers.values()) {
       clearTimeout(timer);
     }
     this.timers.clear();
+    this.timerDeadlines.clear();
+    this.timerCallbacks.clear();
   }
 
   // ==========================================================================
@@ -3328,14 +4559,32 @@ export class GameEngine {
 
     if (!isActor) return null;
 
+    // 被恐惧的玩家：返回带封印标记的行动请求，让客户端显示"技能被封印"提示
+    if (sub.isBlockedByNightmare && player.isNightmared) {
+      return {
+        roleId,
+        availableTargets: [],
+        timeout: this.state.config.nightActionTimeout,
+        hint: '你被噩梦之影恐惧，技能已被封印',
+        isBlockedByNightmare: true,
+        werewolfKillTarget: null,
+        guardProtectTarget: null,
+        wolfVotes: null,
+        wolfVoteConsensus: null,
+        wolfAllies: null,
+        disabledTargets: [],
+        disabledReasons: {},
+      };
+    }
+
     // 构建可用目标列表
     const alivePlayers = this.state.players.filter(
       (p) => !p.isJudge && p.status === 'alive'
     );
     const allSeats = alivePlayers.map((p) => p.seatNumber);
 
-    // 获取禁用目标
-    const { disabledTargets, disabledReasons } = this.getDisabledTargets(forPlayerId);
+    // 获取禁用目标（狼人阶段可能需要修改，使用 let）
+    let { disabledTargets, disabledReasons } = this.getDisabledTargets(forPlayerId);
 
     // 根据角色过滤可用目标
     let availableTargets: number[];
@@ -3345,8 +4594,23 @@ export class GameEngine {
       // 噩梦之影：可选所有存活玩家（排除禁用）
       availableTargets = allSeats.filter((s) => !disabledTargets.includes(s));
     } else if (roleId === 'werewolf') {
-      // 狼人投票：可选所有存活玩家（含自己，允许自刀）
-      availableTargets = allSeats.filter((s) => !disabledTargets.includes(s));
+      // 狼人投票：所有存活玩家都可见，但被恐惧的玩家显示为禁用状态
+      // Bug 修复：被恐惧的玩家应该出现在界面中（避免通过"某人消失"推断出恐惧信息）
+      // 但设置为禁用状态，狼人无法选择该目标
+      const wolfDisabledTargets = [...disabledTargets];
+      const wolfDisabledReasons = { ...disabledReasons };
+      if (this.state.nightmareTarget !== null) {
+        const nightmaredPlayer = this.getPlayerBySeat(this.state.nightmareTarget);
+        if (nightmaredPlayer && nightmaredPlayer.status === 'alive') {
+          wolfDisabledTargets.push(this.state.nightmareTarget);
+          wolfDisabledReasons[this.state.nightmareTarget] = '技能失效';
+        }
+      }
+      // 所有存活玩家都出现在列表中，但被恐惧的玩家被禁用
+      availableTargets = allSeats;
+      // 更新 disabledTargets 和 disabledReasons
+      disabledTargets = wolfDisabledTargets;
+      disabledReasons = wolfDisabledReasons;
     } else if (roleId === 'witch') {
       // 女巫：解药目标（被杀者）或毒药目标（所有存活玩家）
       availableTargets = allSeats;
@@ -3385,17 +4649,31 @@ export class GameEngine {
       wolfVoteConsensus = this.state.wolfVoteConsensus ?? null;
     }
 
+    // 狼人同伴列表
+    let wolfAllies: Array<{ seatNumber: number; nickname: string }> | null = null;
+    if (isWolfPhase) {
+      const sharedRoles = this.state.config.sharedWolfRoles;
+      const wolfPlayers = alivePlayers.filter((p) => isSharedWolfRole(p.role, sharedRoles));
+      wolfAllies = wolfPlayers.map((p) => ({ seatNumber: p.seatNumber, nickname: p.nickname }));
+    }
+
     return {
       roleId,
       availableTargets,
       timeout: this.state.config.nightActionTimeout,
       hint,
+      isBlockedByNightmare: false,
       werewolfKillTarget,
       guardProtectTarget,
       wolfVotes,
       wolfVoteConsensus,
+      wolfAllies,
       disabledTargets,
       disabledReasons,
+      // 女巫自救规则（从服务端配置下发，确保客户端使用权威值而非本地ruleConfig）
+      witchSaveSelfRule: roleId === 'witch'
+        ? this.state.config.witchSaveSelf
+        : undefined,
     };
   }
 
@@ -3413,6 +4691,32 @@ export class GameEngine {
       if (player.mechanicalWolfPhase === 'active') return `使用${player.mechanicalWolfImitatedRole}的技能`;
     }
     return '请行动';
+  }
+
+  /**
+   * 获取入夜前提示信息
+   * 如果隐狼/机械狼将代替原有狼人行动，返回提示文本
+   */
+  getPreNightHint(): string | null {
+    const alivePlayers = this.state.players.filter((p) => !p.isJudge && p.status === 'alive');
+    const sharedRoles = this.state.config.sharedWolfRoles;
+    
+    // 检查是否有存活的共同睁眼狼人
+    const hasSharedWolfAlive = alivePlayers.some((p) => isSharedWolfRole(p.role, sharedRoles));
+    if (hasSharedWolfAlive) return null;
+    
+    // 检查隐狼是否可以代替狼人行动
+    const hiddenWolfAlive = alivePlayers.find((p) => p.role === 'hidden_wolf');
+    if (hiddenWolfAlive) {
+      return '隐狼将代替狼人行动';
+    }
+    
+    // 检查机械狼是否可以代替狼人行动
+    if (this.canMechanicalWolfActAsWolf()) {
+      return '机械狼将代替狼人行动';
+    }
+    
+    return null;
   }
 
   /**
