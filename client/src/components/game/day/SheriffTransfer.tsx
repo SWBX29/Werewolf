@@ -7,6 +7,7 @@ import CountdownTimer from '../CountdownTimer';
 const SheriffTransfer: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
   const isActionLocked = useGameStore((s) => s.isActionLocked);
+  const setActionLocked = useGameStore((s) => s.setActionLocked);
   const submitSheriffTransfer = useGameStore((s) => s.submitSheriffTransfer);
   const sheriffTransferRequest = useGameStore((s) => s.sheriffTransferRequest);
   const sheriffTransferResult = useGameStore((s) => s.sheriffTransferResult);
@@ -15,19 +16,20 @@ const SheriffTransfer: React.FC = () => {
   const [selectedSeat, setSelectedSeat] = useState<number | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
 
+  // Bug 57 说明：可移交目标仅包含存活玩家，死亡警长已自动排除（status !== 'alive'）
+  // 无需额外排除死亡警长，因为死亡玩家已不在存活列表中
+  const availableTargets = useMemo(
+    () =>
+      playerState?.players.filter(
+        (p) => p.status === 'alive' && !p.isJudge,
+      ) ?? [],
+    [playerState?.players],
+  );
+
   if (!playerState) return null;
 
   const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
   const mySeat = myPlayer?.seatNumber ?? 0;
-
-  // 可移交目标：存活且非法官的玩家
-  const availableTargets = useMemo(
-    () =>
-      playerState!.players.filter(
-        (p) => p.status === 'alive' && !p.isJudge,
-      ),
-    [playerState.players],
-  );
 
   const availableSeats = availableTargets.map((p) => p.seatNumber);
 
@@ -45,6 +47,8 @@ const SheriffTransfer: React.FC = () => {
   // 确认移交
   const confirmTransfer = () => {
     if (selectedSeat !== null) {
+      // Bug 50 修复：先锁定状态再提交，防止快速双击重复提交
+      setActionLocked(true);
       submitSheriffTransfer(selectedSeat);
     }
     setShowConfirm(false);

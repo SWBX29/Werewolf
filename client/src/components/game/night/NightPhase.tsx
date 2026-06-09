@@ -1,24 +1,128 @@
+import { useEffect, lazy } from 'react';
 import { useGameStore } from '../../../useGameStore';
-import { ROLE_META } from '@langrensha/shared';
+import { useVoiceStore } from '../../../store/useVoiceStore';
+import { getZegoVoiceService } from '../../../services/zego';
+import { ROLE_META, isSharedWolfRole } from '@langrensha/shared';
 import type { RoleId } from '@langrensha/shared';
 import CountdownTimer from '../CountdownTimer';
-import NightWaiting from './NightWaiting';
-import NightmarePanel from './NightmarePanel';
-import WolfVotePanel from './WolfVotePanel';
-import WitchPanel from './WitchPanel';
-import SeerPanel from './SeerPanel';
-import GuardPanel from './GuardPanel';
-import MechanicalWolfPanel from './MechanicalWolfPanel';
+const NightWaiting = lazy(() => import('./NightWaiting'));
+const NightmarePanel = lazy(() => import('./NightmarePanel'));
+const WolfVotePanel = lazy(() => import('./WolfVotePanel'));
+const WitchPanel = lazy(() => import('./WitchPanel'));
+const SeerPanel = lazy(() => import('./SeerPanel'));
+const GuardPanel = lazy(() => import('./GuardPanel'));
+const MechanicalWolfPanel = lazy(() => import('./MechanicalWolfPanel'));
 
-/**
- * 夜间阶段容器 — 根据当前玩家的角色和行动请求切换面板
- *
- * 倒计时统一在此容器顶部显示，各角色面板不再独立渲染倒计时
- */
 export default function NightPhase() {
   const playerState = useGameStore((s) => s.playerState);
   const roleConfirmed = useGameStore((s) => s.roleConfirmed);
   const phaseTimeRemaining = useGameStore((s) => s.phaseTimeRemaining);
+  const ruleConfig = useGameStore((s) => s.ruleConfig);
+  const connectionState = useVoiceStore((s) => s.connectionState);
+  const setCanSpeak = useVoiceStore((s) => s.setCanSpeak);
+  const setNightVoiceMode = useVoiceStore((s) => s.setNightVoiceMode);
+  const setVoiceStatusHint = useVoiceStore((s) => s.setVoiceStatusHint);
+  const leaveVoiceRoom = useVoiceStore((s) => s.leaveVoiceRoom);
+
+  // 夜晚阶段语音连接管理策略
+  useEffect(() => {
+    if (!playerState || connectionState !== 'CONNECTED') return;
+
+    const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
+    if (!myPlayer) return;
+
+    const nightActionRequest = playerState.nightActionRequest;
+    const sharedWolfRoles = ruleConfig?.sharedWolfRoles || ['werewolf', 'white_wolf_king', 'wolf_king'];
+    
+    // 判断玩家身份
+    const isJudge = myPlayer.isJudge;
+    const isDead = myPlayer.status !== 'alive';
+    const isWolfRole = myPlayer.role ? isSharedWolfRole(myPlayer.role as RoleId, sharedWolfRoles) : false;
+    const isCurrentActionPlayer = nightActionRequest && myPlayer.role === nightActionRequest.roleId;
+    
+    // 死亡玩家 → 断开连接，显示"夜晚休息"
+    if (isDead && !isJudge) {
+      leaveVoiceRoom();
+      setNightVoiceMode(true);
+      setVoiceStatusHint('夜晚休息');
+      return;
+    }
+
+    // 判断当前是否是狼人行动阶段
+    const isWolfActionPhase = nightActionRequest && isSharedWolfRole(nightActionRequest.roleId as RoleId, sharedWolfRoles);
+
+    // 狼人行动阶段 + 我是狼人 + 存活 → 保持连接，狼人可互相交流
+    if (isWolfActionPhase && isWolfRole && myPlayer.status === 'alive') {
+      setCanSpeak(true);
+      getZegoVoiceService().muteMicrophone(false);
+      getZegoVoiceService().resetRemoteAudio();
+      
+      // 设置狼人列表为允许说话的用户
+      const wolfIDs = playerState.players
+        .filter((p) => p.status === 'alive' && p.role && isSharedWolfRole(p.role as RoleId, sharedWolfRoles))
+        .map((p) => p.id);
+      getZegoVoiceService().setAllowedSpeakers(wolfIDs);
+      
+      setNightVoiceMode(true);
+      setVoiceStatusHint('狼人密谋');
+    } 
+    // 法官或当前行动玩家 → 保持连接，法官与行动玩家可交流
+    else if ((isJudge && nightActionRequest) || (isCurrentActionPlayer && myPlayer.status === 'alive')) {
+      setCanSpeak(true);
+      getZegoVoiceService().muteMicrophone(false);
+      getZegoVoiceService().resetRemoteAudio();
+      
+      // 获取法官ID（可能是自己，也可能是其他玩家）
+      const judgeId = isJudge 
+        ? playerState.myPlayerId 
+        : playerState.players.find((p) => p.isJudge)?.id;
+      
+      // 获取当前行动玩家ID列表
+      const actionPlayerIds = playerState.players
+        .filter((p) => p.status === 'alive' && p.role === nightActionRequest.roleId)
+        .map((p) => p.id);
+      
+      const allowedSpeakers = judgeId ? [judgeId, ...actionPlayerIds] : actionPlayerIds;
+      getZegoVoiceService().setAllowedSpeakers(allowedSpeakers);
+      
+      setNightVoiceMode(true);
+      setVoiceStatusHint('法官指导');
+    }
+    // 非狼人 + 非法官 + 非当前行动玩家 → 断开连接，显示"夜晚休息"
+    else if (!isWolfRole && !isJudge && !isCurrentActionPlayer) {
+      leaveVoiceRoom();
+      setNightVoiceMode(true);
+      setVoiceStatusHint('夜晚休息');
+    }
+    // 其他情况：所有人静音（行动前后不可交流）
+    else {
+      setCanSpeak(false);
+      getZegoVoiceService().muteMicrophone(true);
+      getZegoVoiceService().muteAllRemoteAudio();
+      setNightVoiceMode(true);
+      setVoiceStatusHint('夜晚休息');
+    }
+
+    return () => {
+      // 清理时恢复语音状态
+      setCanSpeak(true);
+      getZegoVoiceService().muteMicrophone(false);
+      getZegoVoiceService().resetRemoteAudio();
+      setVoiceStatusHint(null);
+    };
+  }, [
+    playerState?.myPlayerId,
+    playerState?.players,
+    playerState?.nightActionRequest,
+    playerState?.nightActionRequest?.roleId,
+    playerState?.phase,
+    connectionState,
+    ruleConfig?.sharedWolfRoles,
+    leaveVoiceRoom,
+    setCanSpeak,
+    setNightVoiceMode,
+    setVoiceStatusHint,
+  ]);
 
   if (!playerState || !roleConfirmed) return null;
 
@@ -87,6 +191,9 @@ export default function NightPhase() {
       case 'nightmare_shadow':
         return <NightmarePanel />;
       case 'werewolf':
+      // Bug 39 修复：white_wolf_king 和 wolf_king 也使用狼人投票面板
+      case 'white_wolf_king':
+      case 'wolf_king':
         return <WolfVotePanel />;
       case 'witch':
         return <WitchPanel />;

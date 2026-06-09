@@ -9,6 +9,12 @@ const SpectatorMode: React.FC = () => {
   const spectatorIdentities = useGameStore((s) => s.spectatorIdentities);
   const deadNightsElapsed = useGameStore((s) => s.deadNightsElapsed);
 
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [speechMessages]);
+
   if (!playerState) return null;
 
   const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
@@ -25,12 +31,6 @@ const SpectatorMode: React.FC = () => {
   const currentSpeakerSeat = isSpeechPhase
     ? playerState.speechOrder[playerState.currentSpeakerIndex] ?? null
     : null;
-
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [speechMessages]);
 
   const getPlayerName = (seat: number) => {
     const p = players.find((pl) => pl.seatNumber === seat);

@@ -13,7 +13,7 @@ interface ConfirmDialogProps {
 /**
  * 通用二次确认弹窗
  */
-export default function ConfirmDialog({
+function ConfirmDialog({
   open,
   title,
   message,
@@ -47,3 +47,5 @@ export default function ConfirmDialog({
     </div>
   );
 }
+
+export default React.memo(ConfirmDialog);

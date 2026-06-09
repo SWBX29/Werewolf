@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useGameStore } from '../../useGameStore';
-import { ROLE_META } from '@langrensha/shared';
+import { ROLE_META, DEATH_CAUSE_NAMES } from '@langrensha/shared';
 import type { Faction } from '@langrensha/shared';
 
 const GameOver: React.FC = () => {
@@ -15,11 +15,12 @@ const GameOver: React.FC = () => {
   const isGoodWin = winner === 'good';
   const winnerText = isGoodWin ? '好人阵营' : '狼人阵营';
 
+  // Bug 23 修复：添加防御性检查，避免无效角色导致崩溃
   const survivingWolves = finalStats.filter(
-    (s) => s.status === 'alive' && ROLE_META[s.role].faction === 'evil'
+    (s) => s.status === 'alive' && ROLE_META[s.role]?.faction === 'evil'
   );
   const survivingGood = finalStats.filter(
-    (s) => s.status === 'alive' && ROLE_META[s.role].faction === 'good'
+    (s) => s.status === 'alive' && ROLE_META[s.role]?.faction === 'good'
   );
 
   return (
@@ -76,17 +77,25 @@ const GameOver: React.FC = () => {
                 .map((s) => (
                   <div
                     key={s.seatNumber}
-                    className="flex items-center gap-2 px-3 py-1 rounded text-sm bg-night-800"
+                    className={`flex items-center gap-2 px-3 py-1 rounded text-sm ${
+                      s.status === 'alive' ? 'bg-night-800' : 'bg-night-900/50 opacity-60'
+                    }`}
                   >
                     <span className="font-mono w-8">{s.seatNumber}号</span>
                     <span className="flex-1 truncate">{s.nickname}</span>
                     <span
                       className={`tag ${
-                        ROLE_META[s.role].faction === 'evil' ? 'tag-evil' : 'tag-good'
+                        ROLE_META[s.role]?.faction === 'evil' ? 'tag-evil' : 'tag-good'
                       }`}
                     >
-                      {ROLE_META[s.role].name}
+                      {ROLE_META[s.role]?.name ?? s.role}
                     </span>
+                    {s.status !== 'alive' && s.deathCause && (
+                      <span className="text-xs text-gray-500 whitespace-nowrap">
+                        {DEATH_CAUSE_NAMES[s.deathCause] ?? s.deathCause}
+                        {s.deathRound ? ` R${s.deathRound}` : ''}
+                      </span>
+                    )}
                   </div>
                 ))}
             </div>

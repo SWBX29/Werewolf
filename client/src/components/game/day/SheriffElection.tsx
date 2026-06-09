@@ -16,19 +16,19 @@ const SheriffElection: React.FC = () => {
   const [showConfirm, setShowConfirm] = useState(false);
   const [confirmTarget, setConfirmTarget] = useState<number | null>(null);
 
+  // Bug 56 修复：候选人需排除法官（防御性编程）
+  const candidates = useMemo(
+    () =>
+      playerState?.players.filter(
+        (p) => p.status === 'alive' && !p.isSheriff && !p.isJudge,
+      ) ?? [],
+    [playerState?.players],
+  );
+
   if (!playerState) return null;
 
   const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
   const mySeat = myPlayer?.seatNumber ?? 0;
-
-  // 候选人：所有存活且非警长的玩家
-  const candidates = useMemo(
-    () =>
-      playerState.players.filter(
-        (p) => p.status === 'alive' && !p.isSheriff,
-      ),
-    [playerState.players],
-  );
 
   const candidateSeats = candidates.map((p) => p.seatNumber);
 
@@ -53,8 +53,9 @@ const SheriffElection: React.FC = () => {
 
   // 确认投票
   const confirmVote = () => {
-    submitSheriffElectionVote(confirmTarget);
+    // Bug 49 修复：先锁定状态再提交，防止快速双击重复投票
     setActionLocked(true);
+    submitSheriffElectionVote(confirmTarget);
     setShowConfirm(false);
   };
 

@@ -27,6 +27,7 @@
 import mongoose from 'mongoose';
 import dotenv from 'dotenv';
 import http from 'http';
+import compression from 'compression';
 import { WebSocketServer, WebSocket } from 'ws';
 import QRCode from 'qrcode';
 import type {
@@ -61,6 +62,7 @@ import {
 import { LobbyManager, ClientContext } from './LobbyManager.js';
 import { GameEngine } from './GameEngine.js';
 import { connectMongoDB, disconnectMongoDB, isMongoConnected, RoomModel, GameLogModel } from './models.js';
+import { getZegoTokenService } from './services/zegoTokenService.js';
 
 // ============================================================================
 // 环境变量加载
@@ -68,15 +70,32 @@ import { connectMongoDB, disconnectMongoDB, isMongoConnected, RoomModel, GameLog
 
 import path from 'path';
 import fs from 'fs';
+import crypto from 'crypto';
+import { promises as fsp } from 'fs';
 // 计算 .env 文件路径：优先找项目根目录（server 目录的父目录），其次当前工作目录
 const possibleEnvPaths = [
-  path.resolve(__dirname, '../../.env'),    // 从 src/ 往项目根目录
-  path.resolve(__dirname, '../.env'),       // 从 dist/ 往 server 目录
+  path.resolve(__dirname, '../.env'),       // 从 dist/ 往 server 目录（项目根目录）
+  path.resolve(__dirname, '../../.env'),    // 从 src/ 往上层（备用）
   path.resolve(process.cwd(), '.env'),      // 当前工作目录
 ];
-const envPath = possibleEnvPaths.find((p) => fs.existsSync(p)) || possibleEnvPaths[0];
+// 优先选择包含 ZEGO_APP_ID 的 .env 文件
+const envPath = possibleEnvPaths.find((p) => {
+  if (!fs.existsSync(p)) return false;
+  const content = fs.readFileSync(p, 'utf8');
+  return content.includes('ZEGO_APP_ID');
+}) || possibleEnvPaths.find((p) => fs.existsSync(p)) || possibleEnvPaths[0];
 
 dotenv.config({ path: envPath });
+
+/**
+ * 时序安全的字符串比较（防止 timing attack）
+ */
+function timingSafeEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 const MONGODB_URI = process.env.MONGODB_URI || '';
@@ -92,6 +111,39 @@ const lobby = new LobbyManager();
 // ============================================================================
 // DTO 脱敏层 (Anti-Cheat State Stripping)
 // ============================================================================
+
+/**
+ * 递归转换 detail 字段为普通对象
+ * 处理 Map、嵌套对象等情况
+ */
+function convertDetailToPlainObject(detail: unknown): Record<string, unknown> {
+  if (!detail) return {};
+  
+  // 如果是 Map，直接转换
+  if (detail instanceof Map) {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of detail.entries()) {
+      result[key] = typeof value === 'object' && value !== null 
+        ? convertDetailToPlainObject(value) 
+        : value;
+    }
+    return result;
+  }
+  
+  // 如果是普通对象，递归处理嵌套对象
+  if (typeof detail === 'object' && detail !== null) {
+    const result: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(detail)) {
+      result[key] = typeof value === 'object' && value !== null && !(Array.isArray(value))
+        ? convertDetailToPlainObject(value)
+        : value;
+    }
+    return result;
+  }
+  
+  // 其他类型返回空对象
+  return {};
+}
 
 /**
  * 规则26：判断死亡玩家是否可以看到目标玩家的角色
@@ -140,6 +192,11 @@ function stripPlayerToDTO(player: Player, forPlayerId: string | null, engine?: G
     canViewWolfChatHistory = engine.canHiddenWolfViewChat(player.id);
   }
 
+  // 死亡玩家视野：仅当 viewerPlayer 存在且为死亡状态时才检查
+  const canViewRoleFromDead = shouldRevealRole && !isSelf && viewerPlayer && viewerPlayer.status === 'dead' && engine
+    ? canDeadViewRole(viewerPlayer, player, engine)
+    : false;
+
   return {
     id: player.id,
     nickname: player.nickname,
@@ -152,7 +209,7 @@ function stripPlayerToDTO(player: Player, forPlayerId: string | null, engine?: G
     isMuted: player.isMuted,
     // 仅自己可见，且仅在游戏开始后（非 LOBBY 阶段）暴露
     role: shouldRevealRole
-      ? (isSelf ? player.role : (viewerPlayer && canDeadViewRole(viewerPlayer, player, engine) ? player.role : null))
+      ? (isSelf ? player.role : (canViewRoleFromDead ? player.role : null))
       : null,
     witchAntidoteUsed: isSelf && player.role === 'witch' ? player.witchAntidoteUsed : null,
     witchPoisonUsed: isSelf && player.role === 'witch' ? player.witchPoisonUsed : null,
@@ -164,6 +221,8 @@ function stripPlayerToDTO(player: Player, forPlayerId: string | null, engine?: G
     mechanicalWolfPhase: isSelf && player.role === 'mechanical_wolf' ? player.mechanicalWolfPhase : null,
     mechanicalWolfImitatedRole: isSelf && player.role === 'mechanical_wolf' ? player.mechanicalWolfImitatedRole : null,
     mechanicalWolfSkillDeferred: isSelf && player.role === 'mechanical_wolf' ? player.mechanicalWolfSkillDeferred : null,
+    // 死亡原因仅自己可见（用于猎人/狼王判断是否被毒死封印开枪）
+    deathCause: isSelf ? (player.deathCause ?? null) : null,
   };
 }
 
@@ -176,8 +235,8 @@ function stripPlayerToDTO(player: Player, forPlayerId: string | null, engine?: G
  *   - 狼人击杀目标/女巫毒药目标等不包含
  *   - 投票详情仅在投票阶段结束后可见
  */
-function buildPlayerRoomStateDTO(state: RoomState, forPlayerId: string, engine: GameEngine): PlayerRoomStateDTO {
-  const player = state.players.find((p) => p.id === forPlayerId);
+function buildPlayerRoomStateDTO(state: RoomState, forPlayerId: string, engine: GameEngine, playerMap: Map<string, Player>): PlayerRoomStateDTO {
+  const player = playerMap.get(forPlayerId);
 
   return {
     roomCode: state.roomCode,
@@ -284,26 +343,41 @@ function broadcastRoomState(roomCode: string): void {
   const state = engine.getState();
   const clients = lobby.getRoomClients(roomCode);
 
+  // Build player lookup map once — O(n) — to avoid O(n) find per player in the loop
+  const playerMap = new Map<string, Player>();
+  for (const p of state.players) {
+    playerMap.set(p.id, p);
+  }
+
+  // 法官 DTO 对所有法官连接相同 — 构建并序列化一次即可
+  let judgeSerialized: string | null = null;
+
   for (const client of clients) {
     if (!client.ws || client.ws.readyState !== WebSocket.OPEN) continue;
 
-    let message: ServerMessage;
+    let serialized: string;
 
     if (client.isJudge) {
-      // 法官视角：明文全量数据
-      message = {
-        type: 'ROOM_STATE',
-        state: buildJudgeRoomStateDTO(state),
-      };
+      if (!judgeSerialized) {
+        judgeSerialized = JSON.stringify({
+          type: 'ROOM_STATE',
+          state: buildJudgeRoomStateDTO(state),
+        } satisfies ServerMessage);
+      }
+      serialized = judgeSerialized;
     } else {
-      // 普通玩家视角：脱敏数据
-      message = {
+      // 普通玩家视角：每个玩家的脱敏数据不同，必须单独构建
+      serialized = JSON.stringify({
         type: 'ROOM_STATE',
-        state: buildPlayerRoomStateDTO(state, client.playerId, engine),
-      };
+        state: buildPlayerRoomStateDTO(state, client.playerId, engine, playerMap),
+      } satisfies ServerMessage);
     }
 
-    safeSend(client.ws, message);
+    try {
+      client.ws.send(serialized);
+    } catch (error) {
+      console.error('[WS] 发送 ROOM_STATE 失败:', (error as Error).message);
+    }
   }
 }
 
@@ -312,9 +386,15 @@ function broadcastRoomState(roomCode: string): void {
  */
 function broadcastToRoom(roomCode: string, message: ServerMessage): void {
   const clients = lobby.getRoomClients(roomCode);
+  // 预序列化：同一条消息只 stringify 一次，避免 N 个客户端重复序列化
+  const serialized = JSON.stringify(message);
   for (const client of clients) {
-    if (client.ws.readyState !== WebSocket.OPEN) continue;
-    safeSend(client.ws, message);
+    if (!client.ws || client.ws.readyState !== WebSocket.OPEN) continue;
+    try {
+      client.ws.send(serialized);
+    } catch (error) {
+      console.error('[WS] 广播发送失败:', (error as Error).message);
+    }
   }
 }
 
@@ -323,9 +403,15 @@ function broadcastToRoom(roomCode: string, message: ServerMessage): void {
  */
 function sendToJudge(roomCode: string, message: ServerMessage): void {
   const clients = lobby.getRoomClients(roomCode);
+  // 预序列化：法官消息只 stringify 一次
+  const serialized = JSON.stringify(message);
   for (const client of clients) {
     if (client.isJudge && client.ws.readyState === WebSocket.OPEN) {
-      safeSend(client.ws, message);
+      try {
+        client.ws.send(serialized);
+      } catch (error) {
+        console.error('[WS] 法官消息发送失败:', (error as Error).message);
+      }
     }
   }
 }
@@ -337,6 +423,23 @@ function sendToPlayer(playerId: string, message: ServerMessage): void {
   const client = lobby.getClient(playerId);
   if (client && client.ws.readyState === WebSocket.OPEN) {
     safeSend(client.ws, message);
+  }
+}
+
+/**
+ * 向全体玩家广播法官操作通知（仅发给非法官客户端，法官自己不需要看到）
+ */
+function broadcastJudgeAction(
+  roomCode: string,
+  action: import('@langrensha/shared').JudgeActionType,
+  message: string,
+  data: Record<string, unknown> = {},
+): void {
+  const clients = lobby.getRoomClients(roomCode);
+  for (const client of clients) {
+    if (client.isJudge) continue; // 法官自己不需要看到操作通知
+    if (!client.ws || client.ws.readyState !== WebSocket.OPEN) continue;
+    safeSend(client.ws, { type: 'JUDGE_ACTION', action, message, data });
   }
 }
 
@@ -516,6 +619,11 @@ function handleMessage(ws: WebSocket, rawMessage: string): void {
       handleAdminCleanupConfig(client, message);
       break;
 
+    // 心跳响应 — 客户端定期发送 PING 以检测连接存活
+    case 'PING':
+      safeSend(ws, { type: 'PONG' });
+      break;
+
     default:
       safeSend(ws, { type: 'ERROR', code: 'UNKNOWN_MESSAGE', message: `未知消息类型: ${(message as any).type}` });
   }
@@ -615,14 +723,15 @@ function handleLeaveRoom(client: ClientContext): void {
   const roomCode = client.roomCode;
   if (!roomCode) return;
 
-  // 在离开前获取座位号
+  // 在离开前获取座位号和房间引擎
   const engine = lobby.getRoom(roomCode);
   const player = engine ? engine.getState().players.find((p) => p.id === client.playerId) : undefined;
   const leftSeat = player?.seatNumber ?? 0;
 
   const result = lobby.leaveRoom(client.playerId);
 
-  if (result.success && result.roomCode) {
+  // 仅在房间仍然存在时广播（最后一个玩家离开时房间会被销毁）
+  if (result.success && result.roomCode && lobby.getRoom(result.roomCode)) {
     broadcastToRoom(result.roomCode, {
       type: 'PLAYER_LEFT',
       seatNumber: leftSeat,
@@ -661,8 +770,16 @@ function handleDissolveRoom(client: ClientContext): void {
     players: result.players ?? [],
   };
 
+  // 预序列化：解散消息只 stringify 一次
+  const serializedDissolve = JSON.stringify(dissolveMessage);
   for (const c of clients) {
-    safeSend(c.ws, dissolveMessage);
+    if (c.ws.readyState === WebSocket.OPEN) {
+      try {
+        c.ws.send(serializedDissolve);
+      } catch (error) {
+        console.error('[WS] 解散房间消息发送失败:', (error as Error).message);
+      }
+    }
   }
 }
 
@@ -942,12 +1059,27 @@ function handleSpeech(client: ClientContext, message: ClientMessage & { type: 'S
   if (!player || player.status !== 'alive') return;
   if (player.isMuted) return; // 被禁言的玩家不能发言
 
+  // Bug 65 修复：发言内容长度和格式校验
+  const MAX_SPEECH_LENGTH = 500; // 最大发言长度
+  const content = message.content?.trim() ?? '';
+  
+  if (content.length === 0) return; // 空发言不广播
+  if (content.length > MAX_SPEECH_LENGTH) {
+    // 发言过长，仅发送错误提示给发言者
+    safeSend(client.ws, {
+      type: 'ERROR',
+      code: 'SPEECH_TOO_LONG',
+      message: `发言内容过长，最多${MAX_SPEECH_LENGTH}字`,
+    });
+    return;
+  }
+
   // 发言内容广播给房间内所有人（发言是公开的）
   broadcastToRoom(client.roomCode, {
     type: 'SPEECH_CONTENT',
     seatNumber: player.seatNumber,
     nickname: player.nickname,
-    content: message.content,
+    content: content,
   });
 }
 
@@ -1041,6 +1173,7 @@ function handleUpdateNightOrder(client: ClientContext, message: ClientMessage & 
     }
   }
 
+  broadcastJudgeAction(client.roomCode, 'MODIFY_NIGHT_ORDER', '法官调整了夜间行动顺序');
   broadcastRoomState(client.roomCode);
 }
 
@@ -1065,6 +1198,13 @@ function handleJudgeOverrideSettlement(client: ClientContext, message: ClientMes
     return;
   }
 
+  const statusText = message.newStatus === 'alive' ? '复活' : '处死';
+  broadcastJudgeAction(
+    client.roomCode,
+    'OVERRIDE_SETTLEMENT',
+    `法官执行了改判：${message.targetSeat}号玩家被${statusText}`,
+    { targetSeat: message.targetSeat, newStatus: message.newStatus },
+  );
   broadcastRoomState(client.roomCode);
 }
 
@@ -1083,6 +1223,7 @@ function handleJudgeForceNextPhase(client: ClientContext): void {
     return;
   }
 
+  broadcastJudgeAction(client.roomCode, 'FORCE_NEXT_PHASE', '法官强制推进了游戏阶段');
   broadcastRoomState(client.roomCode);
 }
 
@@ -1093,6 +1234,7 @@ function handleJudgePause(client: ClientContext): void {
 
   const result = engine.pauseGame(client.playerId);
   if (result.success) {
+    broadcastJudgeAction(client.roomCode, 'PAUSE', '法官暂停了游戏');
     broadcastRoomState(client.roomCode);
   }
 }
@@ -1104,6 +1246,7 @@ function handleJudgeResume(client: ClientContext): void {
 
   const result = engine.resumeGame(client.playerId);
   if (result.success) {
+    broadcastJudgeAction(client.roomCode, 'RESUME', '法官恢复了游戏');
     broadcastRoomState(client.roomCode);
   }
 }
@@ -1115,6 +1258,7 @@ function handleJudgeModifySpeechOrder(client: ClientContext, message: ClientMess
 
   const result = engine.modifySpeechOrder(client.playerId, message.order);
   if (result.success) {
+    broadcastJudgeAction(client.roomCode, 'MODIFY_SPEECH_ORDER', '法官调整了发言顺序');
     broadcastToRoom(client.roomCode, {
       type: 'SPEECH_ORDER_UPDATE',
       order: message.order,
@@ -1154,6 +1298,12 @@ function handleJudgeTriggerKnightDuel(client: ClientContext, message: ClientMess
     forceNight: result.result?.forceNight ?? false,
   });
 
+  broadcastJudgeAction(
+    client.roomCode,
+    'TRIGGER_KNIGHT_DUEL',
+    `法官代触发了${message.knightSeat}号骑士的决斗`,
+    { knightSeat: message.knightSeat, targetSeat: message.targetSeat },
+  );
   broadcastRoomState(client.roomCode);
 }
 
@@ -1181,6 +1331,12 @@ function handleJudgeTriggerWhiteWolf(client: ClientContext, message: ClientMessa
     targetSeat: message.targetSeat,
     forceNight: true,
   });
+  broadcastJudgeAction(
+    client.roomCode,
+    'TRIGGER_WHITE_WOLF',
+    `法官代触发了${message.wolfSeat}号白狼王的自爆`,
+    { wolfSeat: message.wolfSeat, targetSeat: message.targetSeat },
+  );
 
   broadcastRoomState(client.roomCode);
 }
@@ -1196,6 +1352,12 @@ function handleJudgeSkipSpeech(client: ClientContext, message: ClientMessage & {
     return;
   }
 
+  broadcastJudgeAction(
+    client.roomCode,
+    'SKIP_SPEECH',
+    `法官跳过了${message.seatNumber}号玩家的发言`,
+    { seatNumber: message.seatNumber },
+  );
   broadcastRoomState(client.roomCode);
 }
 
@@ -1320,7 +1482,7 @@ async function handleAdminFetchLogs(client: ClientContext, message: ClientMessag
   }
 
   // 校验消息中携带的管理员密钥
-  if (!message.secret || message.secret !== ADMIN_SECRET) {
+  if (!message.secret || !timingSafeEqual(message.secret, ADMIN_SECRET)) {
     safeSend(client.ws, { type: 'ERROR', code: 'UNAUTHORIZED', message: '管理员密钥错误' });
     return;
   }
@@ -1341,12 +1503,10 @@ async function handleAdminFetchLogs(client: ClientContext, message: ClientMessag
     }
 
     const limit = message.limit || 100;
-    const logs = await GameLogModel.find(filter)
-      .sort({ timestamp: -1 })
-      .limit(limit)
-      .lean();
-
-    const total = await GameLogModel.countDocuments(filter);
+    const [logs, total] = await Promise.all([
+      GameLogModel.find(filter).sort({ timestamp: -1 }).limit(limit).lean(),
+      GameLogModel.countDocuments(filter),
+    ]);
 
     const logDTOs: ActionLogDTO[] = logs.map((doc) => ({
       id: doc._id.toString(),
@@ -1360,7 +1520,7 @@ async function handleAdminFetchLogs(client: ClientContext, message: ClientMessag
       targetNickname: doc.targetNickname,
       phase: doc.phase,
       round: doc.round,
-      detail: Object.fromEntries(doc.detail instanceof Map ? doc.detail : Object.entries(doc.detail || {})),
+      detail: convertDetailToPlainObject(doc.detail),
       overridden: doc.overridden,
       overrideReason: doc.overrideReason,
       nightActionOrderSnapshot: doc.nightActionOrderSnapshot,
@@ -1383,7 +1543,7 @@ function handleAdminCleanupConfig(client: ClientContext, message: ClientMessage 
     return;
   }
 
-  if (!message.secret || message.secret !== ADMIN_SECRET) {
+  if (!message.secret || !timingSafeEqual(message.secret, ADMIN_SECRET)) {
     safeSend(client.ws, { type: 'ERROR', code: 'FORBIDDEN', message: '管理员密钥错误' });
     return;
   }
@@ -1391,10 +1551,14 @@ function handleAdminCleanupConfig(client: ClientContext, message: ClientMessage 
   // 扫描并清理废弃字段
   const deprecatedFields = ['nightmareBlockMode', 'nightmareBlockSpeech', 'nightmareBlockSkill'];
 
-  // 通过 MongoDB 直接更新
-  const RoomModel = mongoose.models.Room;
+  // 使用已导入的 RoomModel（从 ./models.js 导入）
   if (!RoomModel) {
-    safeSend(client.ws, { type: 'ERROR', code: 'CLEANUP_FAILED', message: 'Room model not available' });
+    safeSend(client.ws, {
+      type: 'ADMIN_CLEANUP_RESULT',
+      modifiedCount: 0,
+      success: false,
+      error: 'Room model not available',
+    });
     return;
   }
 
@@ -1408,52 +1572,82 @@ function handleAdminCleanupConfig(client: ClientContext, message: ClientMessage 
     { $unset: unsetObj }
   ).then((result) => {
     safeSend(client.ws, {
-      type: 'ERROR',
-      code: 'CLEANUP_SUCCESS',
-      message: `已清理 ${result.modifiedCount} 个房间的旧配置`,
+      type: 'ADMIN_CLEANUP_RESULT',
+      modifiedCount: result.modifiedCount,
+      success: true,
     });
   }).catch((err) => {
     safeSend(client.ws, {
-      type: 'ERROR',
-      code: 'CLEANUP_FAILED',
-      message: `清理失败: ${err.message}`,
+      type: 'ADMIN_CLEANUP_RESULT',
+      modifiedCount: 0,
+      success: false,
+      error: `清理失败: ${err.message}`,
     });
   });
 }
 
 // ============================================================================
-// 日志持久化
+// 日志持久化（批量写入）
 // ============================================================================
 
-/**
- * 将 ActionLog 写入 MongoDB
- * 异步执行，不阻塞主流程
- */
-async function persistLog(log: ActionLog): Promise<void> {
-  if (!isMongoConnected()) {
-    console.warn('[MongoDB] 日志写入跳过：数据库未连接');
-    return;
-  }
+/** 日志写入缓冲区 */
+const _logBuffer: Array<{
+  roomCode: string;
+  gameId: string;
+  timestamp: number;
+  actorSeat: number;
+  actorNickname: string;
+  actionType: string;
+  targetSeat: number | null;
+  targetNickname: string | null;
+  phase: string;
+  round: number;
+  detail: Record<string, any>;
+  overridden: boolean;
+  overrideReason: string | null;
+  nightActionOrderSnapshot: string[];
+}> = [];
+const LOG_FLUSH_INTERVAL = 2000; // 每 2 秒刷写一次
+const LOG_BATCH_SIZE = 20;       // 缓冲区满 20 条立即刷写
 
+async function flushLogs(): Promise<void> {
+  if (_logBuffer.length === 0) return;
+  const batch = _logBuffer.splice(0);
   try {
-    await GameLogModel.create({
-      roomCode: log.roomCode,
-      gameId: log.gameId,
-      timestamp: log.timestamp,
-      actorSeat: log.actorSeat,
-      actorNickname: log.actorNickname,
-      actionType: log.actionType,
-      targetSeat: log.targetSeat,
-      targetNickname: log.targetNickname,
-      phase: log.phase,
-      round: log.round,
-      detail: log.detail,
-      overridden: log.overridden,
-      overrideReason: log.overrideReason,
-      nightActionOrderSnapshot: log.nightActionOrderSnapshot,
-    });
+    await GameLogModel.insertMany(batch, { ordered: false });
   } catch (error) {
-    console.error('[MongoDB] 日志写入失败:', (error as Error).message, '| actionType:', log.actionType, '| roomCode:', log.roomCode);
+    console.error('[MongoDB] 批量日志写入失败:', (error as Error).message);
+    // 失败的日志丢弃（非关键数据）
+  }
+}
+
+// 定时刷写
+setInterval(flushLogs, LOG_FLUSH_INTERVAL);
+
+/**
+ * 将 ActionLog 写入缓冲区，批量写入 MongoDB
+ * 不阻塞主流程
+ */
+function persistLog(log: ActionLog): void {
+  if (!isMongoConnected()) return;
+  _logBuffer.push({
+    roomCode: log.roomCode,
+    gameId: log.gameId,
+    timestamp: log.timestamp,
+    actorSeat: log.actorSeat,
+    actorNickname: log.actorNickname,
+    actionType: log.actionType,
+    targetSeat: log.targetSeat,
+    targetNickname: log.targetNickname,
+    phase: log.phase,
+    round: log.round,
+    detail: log.detail as Record<string, any>,
+    overridden: log.overridden,
+    overrideReason: log.overrideReason,
+    nightActionOrderSnapshot: log.nightActionOrderSnapshot,
+  });
+  if (_logBuffer.length >= LOG_BATCH_SIZE) {
+    flushLogs();
   }
 }
 
@@ -1481,6 +1675,8 @@ lobby.setPhaseChangeCallback((roomCode: string, phase: GamePhase, subPhase: Nigh
     nightSubPhase: subPhase,
     round,
   });
+  // Bug 2 修复：阶段变化时也广播房间状态，确保客户端获取最新的发言者等信息
+  broadcastRoomState(roomCode);
 });
 
 // 狼人聊天消息回调
@@ -1639,7 +1835,7 @@ lobby.setVoteResultCallback((roomCode: string, votes: Record<number, number | nu
 
 // 游戏结束回调 — 广播游戏结束消息给所有客户端
 lobby.setGameOverCallback((roomCode: string, winner: 'good' | 'evil', round: number, players: Player[]) => {
-  const finalStats = players.map((p) => ({
+  const finalStats = players.filter((p) => !p.isJudge).map((p) => ({
     seatNumber: p.seatNumber,
     nickname: p.nickname,
     role: p.role,
@@ -1672,24 +1868,222 @@ lobby.setIdentityRevealCallback((roomCode: string, seatNumber: number, nickname:
 // HTTP 服务器 & WebSocket 服务器启动
 // ============================================================================
 
-const server = http.createServer((_req, res) => {
-  // 健康检查端点
-  if (_req.url === '/health') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      status: 'ok',
-      rooms: lobby.getRoomCount(),
-      online: lobby.getOnlineCount(),
-      mongodb: isMongoConnected(),
-    }));
-    return;
-  }
+// 计算前端构建产物目录（生产环境静态文件）
+const CLIENT_DIST_DIR = path.resolve(__dirname, '../../client/dist');
 
-  res.writeHead(404);
-  res.end('Not Found');
+// MIME 类型映射
+const MIME_TYPES: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.map': 'application/json',
+  // 预压缩文件 MIME 类型
+  '.gz': 'application/gzip',
+  '.br': 'application/octet-stream',
+};
+
+const compressMiddleware = compression();
+
+const server = http.createServer((req, res) => {
+  // 通过 gzip 压缩中间件
+  compressMiddleware(req as any, res as any, async () => {
+    // 健康检查端点
+    if (req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        status: 'ok',
+        rooms: lobby.getRoomCount(),
+        online: lobby.getOnlineCount(),
+        mongodb: isMongoConnected(),
+      }));
+      return;
+    }
+
+    // Zego Token 生成接口
+    if (req.url?.startsWith('/api/zego/token')) {
+      try {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const userId = url.searchParams.get('userId');
+
+        if (!userId) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: '缺少 userId 参数' }));
+          return;
+        }
+
+        const roomCode = url.searchParams.get('roomCode');
+        if (!roomCode) {
+          if (userId !== 'preload' && userId !== 'init') {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: '缺少房间参数' }));
+            return;
+          }
+        } else {
+          const engine = lobby.getRoom(roomCode);
+          if (!engine) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: '房间不存在' }));
+            return;
+          }
+          const clients = lobby.getRoomClients(roomCode);
+          const isValidUser = clients.some(c => c.playerId === userId);
+          if (!isValidUser) {
+            res.writeHead(403, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: '无权生成Token' }));
+            return;
+          }
+        }
+
+        const tokenService = getZegoTokenService();
+        const token = tokenService.generateToken(userId);
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ token, appID: tokenService.getAppId() }));
+      } catch (err) {
+        const message = err instanceof Error ? err.message : 'Token 生成失败';
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: message }));
+      }
+      return;
+    }
+
+    // 静态文件服务（前端生产构建产物）— 全异步，不阻塞事件循环
+    try {
+      await fsp.access(CLIENT_DIST_DIR);
+    } catch {
+      res.writeHead(404);
+      res.end('Not Found');
+      return;
+    }
+
+    const requestUrl = req.url || '/';
+    const cleanUrl = requestUrl.split('?')[0];
+    let filePath = path.join(CLIENT_DIST_DIR, cleanUrl === '/' ? 'index.html' : cleanUrl);
+
+    // 安全检查：防止路径穿越
+    if (!filePath.startsWith(CLIENT_DIST_DIR)) {
+      res.writeHead(403);
+      res.end('Forbidden');
+      return;
+    }
+
+    // 通用安全响应头
+    const securityHeaders: Record<string, string> = {
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
+    };
+
+    try {
+      const stat = await fsp.stat(filePath);
+      if (stat.isFile()) {
+        const ext = path.extname(filePath).toLowerCase();
+        const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+        const isAsset = filePath.includes('/assets/');
+
+        const cacheControl = isAsset
+          ? 'public, max-age=31536000, immutable'
+          : 'no-cache';
+
+        // 预压缩文件支持：检查 Accept-Encoding 并返回 .br 或 .gz 文件
+        const acceptEncoding = req.headers['accept-encoding'] || '';
+        const supportsBrotli = acceptEncoding.includes('br');
+        const supportsGzip = acceptEncoding.includes('gzip');
+
+        let compressedFilePath: string | null = null;
+        let contentEncoding: string | null = null;
+
+        // 仅对 JS、CSS、JSON 等文本资源尝试预压缩文件
+        const compressibleExts = ['.js', '.css', '.json', '.html', '.svg'];
+        if (compressibleExts.includes(ext) && isAsset) {
+          if (supportsBrotli) {
+            const brPath = filePath + '.br';
+            try {
+              await fsp.access(brPath);
+              compressedFilePath = brPath;
+              contentEncoding = 'br';
+            } catch {
+              // .br 文件不存在，尝试 .gz
+            }
+          }
+          
+          if (!compressedFilePath && supportsGzip) {
+            const gzPath = filePath + '.gz';
+            try {
+              await fsp.access(gzPath);
+              compressedFilePath = gzPath;
+              contentEncoding = 'gzip';
+            } catch {
+              // .gz 文件不存在，使用原始文件
+            }
+          }
+        }
+
+        // 如果找到预压缩文件，返回压缩版本
+        if (compressedFilePath && contentEncoding) {
+          res.writeHead(200, {
+            'Content-Type': contentType,
+            'Content-Encoding': contentEncoding,
+            'Cache-Control': cacheControl,
+            ...securityHeaders,
+          });
+          fs.createReadStream(compressedFilePath).pipe(res);
+          return;
+        }
+
+        // 返回原始文件
+        res.writeHead(200, {
+          'Content-Type': contentType,
+          'Cache-Control': cacheControl,
+          ...securityHeaders,
+        });
+        fs.createReadStream(filePath).pipe(res);
+        return;
+      }
+    } catch {
+      // 文件不存在，继续 SPA 回退逻辑
+    }
+
+    // SPA 回退：仅对 Accept: text/html 的请求返回 index.html
+    const accept = req.headers.accept || '';
+    if (accept.includes('text/html')) {
+      const indexPath = path.join(CLIENT_DIST_DIR, 'index.html');
+      try {
+        await fsp.access(indexPath);
+        res.writeHead(200, {
+          'Content-Type': 'text/html; charset=utf-8',
+          'Cache-Control': 'no-cache',
+          ...securityHeaders,
+        });
+        fs.createReadStream(indexPath).pipe(res);
+        return;
+      } catch {
+        // index.html 不存在
+      }
+    }
+
+    res.writeHead(404);
+    res.end('Not Found');
+  });
 });
 
-const wss = new WebSocketServer({ server });
+const wss = new WebSocketServer({
+  server,
+  perMessageDeflate: {
+    zlibDeflateOptions: { chunkSize: 1024, memLevel: 7, level: 3 },
+    zlibInflateOptions: { chunkSize: 10 * 1024 },
+    threshold: 512, // 仅压缩 > 512 字节的消息（ROOM_STATE 等大消息受益最大）
+  },
+});
 
 // ============================================================================
 // LOBBY 阶段掉线检查定时器

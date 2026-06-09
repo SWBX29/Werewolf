@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import TargetSelector from '../TargetSelector';
 import WolfChat from './WolfChat';
@@ -24,9 +24,16 @@ export default function WolfVotePanel() {
 
   // 已投票时初始化为当前投票目标，方便修改
   const myCurrentVote = wolfVotes[mySeat] ?? null;
-  const [selected, setSelected] = useState<number | null>(myCurrentVote);
-  const [hasVoted, setHasVoted] = useState(myCurrentVote !== null);
+  const [selected, setSelected] = useState<number | null>(null);
+  const [hasVoted, setHasVoted] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+
+  // Bug 3 修复：使用 useEffect 同步投票状态，处理重连场景
+  useEffect(() => {
+    // 同步服务端的投票状态到本地
+    setSelected(myCurrentVote);
+    setHasVoted(myCurrentVote !== null);
+  }, [myCurrentVote]);
 
   if (!nightActionRequest) return null;
 

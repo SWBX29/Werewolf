@@ -15,29 +15,11 @@
 
 import React, { useState } from 'react';
 import { useGameStore } from '../useGameStore';
+import { useVoiceStore } from '../store/useVoiceStore';
+import { getZegoVoiceService } from '../services/zego';
 import type { RoleId, Player, PlayerStatus, GamePhase, NightActionData, WolfChatMessage } from '@langrensha/shared';
-import { ROLE_META, isEvilRole, isSharedWolfRole } from '@langrensha/shared';
-
-// ============================================================================
-// 阶段中文名映射
-// ============================================================================
-
-const PHASE_NAMES: Record<GamePhase, string> = {
-  LOBBY: '大厅等待',
-  ROLE_REVEAL: '身份展示',
-  PRE_NIGHT: '入夜等待',
-  NIGHT: '夜间行动',
-  NIGHT_SETTLEMENT: '夜间结算',
-  DAY_ANNOUNCE: '公布死讯',
-  DAY_SPEECH: '发言阶段',
-  DAY_VOTE: '投票阶段',
-  DAY_SETTLEMENT: '白天结算',
-  DAY_INTERRUPT: '白天中断',
-  PK_VOTE: 'PK投票',
-  SHERIFF_ELECTION: '警长选举',
-  SHERIFF_TRANSFER: '警徽移交',
-  GAME_OVER: '游戏结束',
-};
+import { ROLE_META, isEvilRole, isSharedWolfRole, PHASE_NAMES, DEATH_CAUSE_NAMES } from '@langrensha/shared';
+import VoiceControlBar from './game/VoiceControlBar';
 
 // ============================================================================
 // JudgeConsole 组件
@@ -70,10 +52,11 @@ const JudgeConsole: React.FC = () => {
     ruleConfig,
     sheriffTransferRequest,
     knightDuelResult,
-    preNightHint,
-    roleConfirmed,
     gameOverData,
   } = useGameStore();
+
+  const connectionState = useVoiceStore((s) => s.connectionState);
+  const speakingUsers = useVoiceStore((s) => s.speakingUsers);
 
   // 法官操作状态
   const [overrideTarget, setOverrideTarget] = useState<number | null>(null);
@@ -82,6 +65,7 @@ const JudgeConsole: React.FC = () => {
   const [explodeWolfSeat, setExplodeWolfSeat] = useState<number | null>(null);
   const [explodeTargetSeat, setExplodeTargetSeat] = useState<number | null>(null);
   const [showDissolveConfirm, setShowDissolveConfirm] = useState(false);
+  const [voiceActionFeedback, setVoiceActionFeedback] = useState<string | null>(null);
 
   // 编辑中的夜间顺序
   const [editingNightOrder, setEditingNightOrder] = useState<RoleId[] | null>(null);
@@ -105,7 +89,7 @@ const JudgeConsole: React.FC = () => {
           <p className="text-sm text-gray-400">{reason}</p>
           {players.length > 0 && (
             <div className="space-y-2 text-left">
-              <h4 className="text-sm font-semibold text-amber-300">本局玩家信息</h4>
+              <h4 className="text-sm font-semibold text-amber-300">房间玩家信息</h4>
               <div className="max-h-64 overflow-y-auto space-y-1">
                 {players
                   .sort((a, b) => a.seatNumber - b.seatNumber)
@@ -121,9 +105,11 @@ const JudgeConsole: React.FC = () => {
                           {ROLE_META[p.role as RoleId]?.name ?? p.role}
                         </span>
                       )}
-                      <span className={`text-xs ${p.status === 'alive' ? 'text-green-400' : 'text-gray-500'}`}>
-                        {p.status === 'alive' ? '存活' : '已死亡'}
-                      </span>
+                      {p.status && (
+                        <span className={`text-xs ${p.status === 'alive' ? 'text-green-400' : 'text-gray-500'}`}>
+                          {p.status === 'alive' ? '存活' : '已死亡'}
+                        </span>
+                      )}
                     </div>
                   ))}
               </div>
@@ -139,7 +125,10 @@ const JudgeConsole: React.FC = () => {
 
   const state = judgeState;
   const allPlayers = state.players.filter((p) => !p.isJudge);
-  const alivePlayers = allPlayers;
+  // Bug 12 修复：变量名改为 nonJudgePlayers，更准确反映其含义
+  const nonJudgePlayers = allPlayers;
+  // 真正的存活玩家列表
+  const alivePlayers = allPlayers.filter((p) => p.status === 'alive');
 
   // 构建座位号 → 玩家映射（用于全员明牌面板和大厅列表始终显示所有座位）
   const totalSeats = state.config.playerCount;
@@ -189,7 +178,18 @@ const JudgeConsole: React.FC = () => {
           </span>
           {state.isPaused && <span className="tag bg-yellow-900 text-yellow-300">已暂停</span>}
         </div>
-        <button onClick={state.phase === 'LOBBY' ? () => setShowDissolveConfirm(true) : leaveRoom} className="btn-danger text-sm">
+        {/* Bug 17 修复：游戏进行中离开需要确认 */}
+        <button 
+          onClick={() => {
+            if (state.phase === 'LOBBY') {
+              setShowDissolveConfirm(true);
+            } else {
+              // 游戏进行中也显示确认弹窗
+              setShowDissolveConfirm(true);
+            }
+          }} 
+          className="btn-danger text-sm"
+        >
           {state.phase === 'LOBBY' ? '解散房间' : '离开房间'}
         </button>
       </div>
@@ -269,6 +269,8 @@ const JudgeConsole: React.FC = () => {
                   );
                 }
 
+                const isSpeaking = speakingUsers[p.id] !== undefined;
+
                 return (
                   <div
                     key={p.id}
@@ -282,10 +284,20 @@ const JudgeConsole: React.FC = () => {
                       {p.isHost && !p.isJudge && (
                         <span className="text-xs text-yellow-500">(房主)</span>
                       )}
+                      {/* 语音状态指示 */}
+                      {connectionState === 'CONNECTED' && isSpeaking && (
+                        <span className="text-amber-400 text-xs animate-pulse">💬</span>
+                      )}
                     </div>
-                    <span className={`text-xs ${p.isReady ? 'text-green-400' : 'text-gray-500'}`}>
-                      {p.isReady ? '已准备 ✅' : '未准备'}
-                    </span>
+                    <div className="flex items-center gap-2">
+                      {/* 说话状态 */}
+                      {connectionState === 'CONNECTED' && isSpeaking && (
+                        <span className="text-xs text-amber-300">说话中</span>
+                      )}
+                      <span className={`text-xs ${p.isReady ? 'text-green-400' : 'text-gray-500'}`}>
+                        {p.isReady ? '已准备 ✅' : '未准备'}
+                      </span>
+                    </div>
                   </div>
                 );
               })}
@@ -326,8 +338,66 @@ const JudgeConsole: React.FC = () => {
         </div>
       )}
 
+      {/* ====== 游戏结束视图 ====== */}
+      {state.phase === 'GAME_OVER' && gameOverData && (
+        <div className="card max-w-lg mx-auto space-y-6 text-center p-6">
+          <div className="text-6xl">🏆</div>
+          <h2 className="text-2xl font-bold">游戏结束</h2>
+          <p className={`text-xl font-bold ${gameOverData.winner === 'good' ? 'text-blue-400' : 'text-red-400'}`}>
+            【{gameOverData.winner === 'good' ? '好人阵营' : '狼人阵营'}】获胜！
+          </p>
+          {phaseTimeRemaining > 0 && (
+            <div className="flex items-center justify-center gap-2 text-red-300">
+              <span className="text-xs text-red-400">自动返回大厅</span>
+              <span className="text-lg font-bold">{phaseTimeRemaining}</span>
+              <span className="text-xs text-gray-500">秒</span>
+            </div>
+          )}
+          <div className="space-y-2 text-left">
+            <h4 className="text-sm font-semibold text-amber-300">全场身份</h4>
+            <div className="max-h-64 overflow-y-auto space-y-1">
+              {gameOverData.finalStats
+                .sort((a, b) => a.seatNumber - b.seatNumber)
+                .map((s) => (
+                  <div
+                    key={s.seatNumber}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded text-sm ${
+                      s.status === 'alive' ? 'bg-night-800' : 'bg-night-900/50 opacity-60'
+                    }`}
+                  >
+                    <span className="font-mono w-8">{s.seatNumber}号</span>
+                    <span className="flex-1 truncate">{s.nickname}</span>
+                    <span className={`tag ${ROLE_META[s.role]?.faction === 'evil' ? 'tag-evil' : 'tag-good'}`}>
+                      {ROLE_META[s.role]?.name ?? s.role}
+                    </span>
+                    {s.status !== 'alive' && (
+                      <span className="text-xs text-gray-500">
+                        {s.deathCause ? DEATH_CAUSE_NAMES[s.deathCause] ?? s.deathCause : '死亡'}
+                        {s.deathRound ? ` R${s.deathRound}` : ''}
+                      </span>
+                    )}
+                  </div>
+                ))}
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <button className="btn-primary flex-1" onClick={leaveRoom}>返回大厅</button>
+            <button className="btn-secondary flex-1" onClick={dissolveRoom}>解散房间</button>
+          </div>
+        </div>
+      )}
+
+      {state.phase === 'GAME_OVER' && !gameOverData && (
+        <div className="card max-w-lg mx-auto text-center p-6">
+          <div className="text-4xl mb-3">🏁</div>
+          <h2 className="text-xl font-bold mb-2">游戏结束</h2>
+          <p className="text-sm text-gray-400 mb-4">正在加载结算数据…</p>
+          <button className="btn-primary" onClick={leaveRoom}>返回大厅</button>
+        </div>
+      )}
+
       {/* ====== 游戏进行中：3栏面板 ====== */}
-      {state.phase !== 'LOBBY' && (
+      {state.phase !== 'LOBBY' && state.phase !== 'GAME_OVER' && (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         {/* ====== 左栏：全员明牌面板 ====== */}
         <div className="card lg:col-span-1">
@@ -532,6 +602,9 @@ const JudgeConsole: React.FC = () => {
           <div className="card">
             <h2 className="text-lg font-semibold mb-3">发言顺序</h2>
             <div className="space-y-1">
+              {state.speechOrder.length === 0 && (
+                <p className="text-xs text-gray-600 text-center py-4">发言顺序将在白天阶段生成</p>
+              )}
               {state.speechOrder.map((seatNumber, index) => {
                 const player = alivePlayers.find((p) => p.seatNumber === seatNumber);
                 if (!player) return null;
@@ -945,19 +1018,6 @@ const JudgeConsole: React.FC = () => {
                 </div>
               )}
 
-              {/* 游戏结束倒计时 */}
-              {state.phase === 'GAME_OVER' && (
-                <div className="mb-3 p-2 rounded bg-red-950/30 border border-red-900">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs text-red-400">游戏结束倒计时</span>
-                    <div className="flex items-center gap-2">
-                      <span className="text-xl font-bold text-red-300">{phaseTimeRemaining}</span>
-                      <span className="text-xs text-gray-500">秒</span>
-                    </div>
-                  </div>
-                </div>
-              )}
-
               {/* 当前夜间子阶段 */}
               {state.nightSubPhase && (
                 <div className="mb-3 p-2 rounded bg-indigo-950/30 border border-indigo-900">
@@ -1138,6 +1198,168 @@ const JudgeConsole: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* 语音控制面板（法官专属） */}
+      <div className="card mt-4">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="text-lg font-semibold">语音控制</h2>
+          <div className="flex items-center gap-2">
+            <span className={`w-2 h-2 rounded-full ${connectionState === 'CONNECTED' ? 'bg-green-400' : connectionState === 'CONNECTING' || connectionState === 'RECONNECTING' ? 'bg-yellow-400 animate-pulse' : 'bg-red-500'}`} />
+            <span className="text-xs text-gray-400">
+              {connectionState === 'CONNECTED' ? '已连接' : connectionState === 'CONNECTING' ? '连接中' : '未连接'}
+            </span>
+          </div>
+        </div>
+        {connectionState === 'CONNECTED' ? (<>
+          <div className="grid grid-cols-2 gap-2 mb-3">
+            <button
+              onClick={() => {
+                getZegoVoiceService().muteAllRemoteAudio();
+                setVoiceActionFeedback('已全体静音');
+                setTimeout(() => setVoiceActionFeedback(null), 2000);
+              }}
+              className="btn-secondary text-sm py-1.5"
+            >
+              🔇 全体静音
+            </button>
+            <button
+              onClick={() => {
+                getZegoVoiceService().unmuteAllRemoteAudio();
+                setVoiceActionFeedback('已恢复全体语音');
+                setTimeout(() => setVoiceActionFeedback(null), 2000);
+              }}
+              className="btn-secondary text-sm py-1.5"
+            >
+              🔊 全体取消静音
+            </button>
+          </div>
+          {state.phase === 'NIGHT' && (
+            <div className="mb-3 p-2 rounded bg-red-950/30 border border-red-900">
+              <p className="text-xs text-red-300">
+                夜晚模式：法官可与当前行动玩家交流
+              </p>
+              <div className="space-y-2 mt-2">
+                {/* 当前行动玩家信息 */}
+                {state.nightSubPhase && (
+                  <div className="p-2 rounded bg-indigo-950/30 border border-indigo-900">
+                    <p className="text-xs text-indigo-300">
+                      当前行动：{ROLE_META[state.nightSubPhase.currentRole].name}
+                    </p>
+                  </div>
+                )}
+                <div className="grid grid-cols-2 gap-2">
+                  <button
+                    onClick={() => {
+                      // 法官与当前行动玩家交流
+                      const judgeId = state.players.find((p) => p.isJudge)?.id;
+                      const currentRole = state.nightSubPhase?.currentRole;
+                      if (currentRole) {
+                        const actionPlayerIds = state.players
+                          .filter((p) => p.status === 'alive' && p.role === currentRole)
+                          .map((p) => p.id);
+                        const allowedSpeakers = judgeId ? [judgeId, ...actionPlayerIds] : actionPlayerIds;
+                        getZegoVoiceService().setAllowedSpeakers(allowedSpeakers);
+                        setVoiceActionFeedback('已设置法官指导模式');
+                        setTimeout(() => setVoiceActionFeedback(null), 2000);
+                      }
+                    }}
+                    className="btn-secondary text-xs py-1"
+                    disabled={!state.nightSubPhase}
+                  >
+                    ⚖️ 法官指导
+                  </button>
+                  <button
+                    onClick={() => {
+                      // 仅狼人可说话
+                      const wolfIDs = state.players
+                        .filter((p) => p.status === 'alive' && p.role && isSharedWolfRole(p.role as RoleId))
+                        .map((p) => p.id);
+                      getZegoVoiceService().setAllowedSpeakers(wolfIDs);
+                      setVoiceActionFeedback('已设置狼人密谋模式');
+                      setTimeout(() => setVoiceActionFeedback(null), 2000);
+                    }}
+                    className="btn-secondary text-xs py-1"
+                  >
+                    🐺 仅狼人可说话
+                  </button>
+                </div>
+                <button
+                  onClick={() => {
+                    getZegoVoiceService().resetRemoteAudio();
+                    setVoiceActionFeedback('已恢复所有人语音');
+                    setTimeout(() => setVoiceActionFeedback(null), 2000);
+                  }}
+                  className="btn-secondary text-xs py-1 w-full"
+                >
+                  恢复所有人
+                </button>
+              </div>
+            </div>
+          )}
+          {state.phase === 'DAY_SPEECH' && (
+            <div className="mb-3 p-2 rounded bg-amber-950/30 border border-amber-900">
+              <p className="text-xs text-amber-300">
+                发言模式：仅当前发言者可说话
+              </p>
+              <div className="grid grid-cols-2 gap-2 mt-2">
+                <button
+                  onClick={() => {
+                    const currentSpeakerSeat = state.speechOrder[state.speechOrder.length > 0 ? 0 : -1];
+                    if (currentSpeakerSeat !== undefined && currentSpeakerSeat !== -1) {
+                      const speaker = state.players.find((p) => p.seatNumber === currentSpeakerSeat);
+                      if (speaker) {
+                        getZegoVoiceService().setAllowedSpeakers([speaker.id]);
+                      }
+                    }
+                  }}
+                  className="btn-secondary text-xs py-1"
+                >
+                  🎤 仅发言者
+                </button>
+                <button
+                  onClick={() => {
+                    getZegoVoiceService().resetRemoteAudio();
+                  }}
+                  className="btn-secondary text-xs py-1"
+                >
+                  恢复所有人
+                </button>
+              </div>
+            </div>
+          )}
+          {/* 玩家语音状态列表 */}
+          <div className="space-y-1 max-h-40 overflow-y-auto">
+            {state.players.filter((p) => !p.isJudge && p.status === 'alive').map((player) => {
+              const isSpeaking = speakingUsers[player.id] !== undefined;
+              return (
+                <div key={player.id} className="flex items-center justify-between px-2 py-1 rounded bg-night-800/50 text-sm">
+                  <div className="flex items-center gap-2">
+                    <span className="text-gray-300">
+                      {player.seatNumber}号 {player.nickname}
+                    </span>
+                    {isSpeaking && (
+                      <span className="text-amber-400 text-xs animate-pulse">💬 说话中</span>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => {
+                      getZegoVoiceService().muteRemoteAudioByUserID(player.id);
+                    }}
+                    className="text-xs text-gray-500 hover:text-red-400"
+                  >
+                    静音
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </>) : (
+          <p className="text-sm text-gray-600">语音未连接，请检查服务是否启动</p>
+        )}
+      </div>
+
+      {/* 语音控制栏（紧凑模式） */}
+      <VoiceControlBar compact />
     </div>
   );
 };

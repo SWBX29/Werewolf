@@ -12,7 +12,7 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { useGameStore } from '../useGameStore';
+import { useGameStore, getWsUrl } from '../useGameStore';
 import type { ActionLogDTO, GamePhase, ActionType } from '@langrensha/shared';
 import { ROLE_META } from '@langrensha/shared';
 
@@ -80,6 +80,7 @@ const PHASE_NAMES: Record<GamePhase, string> = {
   NIGHT_SETTLEMENT: '夜间结算',
   DAY_ANNOUNCE: '公布死讯',
   DAY_SPEECH: '发言',
+  PRE_VOTE_WAIT: '投票前等待',
   DAY_VOTE: '投票',
   DAY_SETTLEMENT: '白天结算',
   DAY_INTERRUPT: '中断',
@@ -120,12 +121,7 @@ const AdminDashboard: React.FC = () => {
   // 确保已连接
   useEffect(() => {
     if (!isConnected) {
-      const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const url =
-        window.location.port === '5173' || window.location.hostname === 'localhost'
-          ? `${protocol}//localhost:3001`
-          : `${protocol}//${window.location.host}`;
-      connect(url);
+      connect(getWsUrl());
     }
   }, []);
 
