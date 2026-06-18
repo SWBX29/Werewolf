@@ -25,6 +25,7 @@ import {
   isEvilRole,
   isGodRole,
   isVillagerRole,
+  ROLE_META,
 } from '@langrensha/shared';
 
 // ============================================================================
@@ -333,12 +334,17 @@ export function isMechanicalWolfImitationFailed(imitatedRole: RoleId): boolean {
  * @returns 查验结果阵营
  */
 export function getMechanicalWolfSeerResult(player: Player): Faction {
-  // 机械狼模仿预言家时，被查验结果取决于模仿状态
-  if (player.mechanicalWolfImitatedRole === 'seer') {
-    // 模仿预言家成功 → 显示为好人
-    return 'good';
+  // 尚未选择模仿目标 → 狼人
+  if (!player.mechanicalWolfPhase || player.mechanicalWolfPhase === 'selecting') {
+    return 'evil';
   }
 
-  // 其他情况 → 显示为狼人
+  // 已选择模仿目标（无论模仿成功或失败）：由模仿目标角色的阵营决定
+  // 包括 learning / active / silent / failed 阶段
+  if (player.mechanicalWolfImitatedRole) {
+    return ROLE_META[player.mechanicalWolfImitatedRole].faction;
+  }
+
+  // 无模仿角色信息时默认为狼人
   return 'evil';
 }

@@ -4468,21 +4468,21 @@ export class GameEngine {
    *
    * 规则四：
    * - 尚未选择模仿目标 → 狼人
-   * - 已选择但尚未得知技能 → 由模仿角色阵营决定
-   * - 已得知技能可使用 → 由模仿角色阵营决定
-   * - 模仿失败 → 狼人
+   * - 已选择模仿目标（无论模仿成功或失败） → 由模仿目标角色的阵营决定
    */
   private getMechanicalWolfSeerResult(player: Player): Faction {
+    // 尚未选择模仿目标 → 狼人
     if (!player.mechanicalWolfPhase || player.mechanicalWolfPhase === 'selecting') {
       return 'evil';
     }
-    if (player.mechanicalWolfPhase === 'failed') {
-      return 'evil';
-    }
-    // learning / active / silent：由模仿角色的阵营决定
+
+    // 已选择模仿目标（无论模仿成功或失败）：由模仿目标角色的阵营决定
+    // 包括 learning / active / silent / failed 阶段
     if (player.mechanicalWolfImitatedRole) {
       return ROLE_META[player.mechanicalWolfImitatedRole].faction;
     }
+
+    // 无模仿角色信息时默认为狼人
     return 'evil';
   }
 
