@@ -238,6 +238,12 @@ const RuleConfigSubSchema = new Schema<RuleConfig>({
     enum: ['DEATH', 'ALIVE'],
   },
   poisonBlockGun: { type: Boolean, required: true },
+  hunterDeathShootCauses: {
+    type: [String],
+    required: true,
+    enum: ['witch_poison', 'werewolf_kill', 'vote_out'],
+    default: ['witch_poison', 'werewolf_kill', 'vote_out'],
+  },
   witchCanUseBothPotions: { type: Boolean, required: true, default: false },
   knightDuelWolfKing: {
     type: String,
