@@ -264,13 +264,20 @@ const HomeView: React.FC = () => {
             </button>
           </div>
 
-          {/* 管理员入口 */}
-          <div className="border-t border-night-700 pt-3 text-center">
+          {/* 管理员入口 & 模拟器入口 */}
+          <div className="border-t border-night-700 pt-3 text-center flex items-center justify-center gap-4">
             <button
               onClick={() => useGameStore.getState().setView('admin')}
               className="text-sm text-gray-500 hover:text-gray-300"
             >
               管理员后台
+            </button>
+            <span className="text-gray-700">|</span>
+            <button
+              onClick={() => useGameStore.getState().setView('simulator')}
+              className="text-sm text-gray-500 hover:text-gray-300"
+            >
+              游戏模拟器
             </button>
           </div>
         </div>

@@ -21,6 +21,7 @@ const HomeView = lazy(() => import('./components/HomeView'));
 const JudgeConsole = lazy(() => import('./components/JudgeConsole'));
 const AdminDashboard = lazy(() => import('./components/AdminDashboard'));
 const GameView = lazy(() => import('./components/game/GameView'));
+const SimulatorView = lazy(() => import('./components/SimulatorView'));
 
 // ============================================================================
 // 组件预加载策略 — 首页加载后自动预加载游戏组件
@@ -374,6 +375,7 @@ const App: React.FC = () => {
           isJudge ? <JudgeConsole /> : <GameView />
         )}
         {currentView === 'admin' && <AdminDashboard />}
+        {currentView === 'simulator' && <SimulatorView />}
       </Suspense>
     </div>
   );
