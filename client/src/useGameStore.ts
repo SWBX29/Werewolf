@@ -55,7 +55,7 @@ import { useVoiceStore } from './store/useVoiceStore';
 // 视图路由状态
 // ============================================================================
 
-export type ViewType = 'home' | 'game' | 'admin';
+export type ViewType = 'home' | 'game' | 'admin' | 'simulator';
 
 // ============================================================================
 // Store 状态接口

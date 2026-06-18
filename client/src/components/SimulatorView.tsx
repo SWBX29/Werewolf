@@ -1,0 +1,293 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useSimulatorStore } from './simulator/useSimulatorStore';
+import { useGameStore } from '../useGameStore';
+import { PHASE_NAMES } from '@langrensha/shared';
+import RoomSetupPanel from './simulator/RoomSetupPanel';
+import SeatMap from './simulator/SeatMap';
+import EventLog from './simulator/EventLog';
+import AutoStrategyPanel from './simulator/AutoStrategyPanel';
+import GamePanelWrapper from './simulator/GamePanelWrapper';
+import JudgeConsole from './JudgeConsole';
+
+// ============================================================================
+// 常量
+// ============================================================================
+
+const AUTO_MODE_OPTIONS = [
+  { value: 'off', label: '关闭' },
+  { value: 'suggest', label: '仅建议' },
+  { value: 'auto', label: '自动执行' },
+] as const;
+
+// ============================================================================
+// SimulatorView 主组件
+// ============================================================================
+
+const SimulatorView: React.FC = () => {
+  // ---- Simulator store ----
+  const simulatorPhase = useSimulatorStore((s) => s.simulatorPhase);
+  const serverUrl = useSimulatorStore((s) => s.serverUrl);
+  const setServerUrl = useSimulatorStore((s) => s.setServerUrl);
+  const connections = useSimulatorStore((s) => s.connections);
+  const roomCode = useSimulatorStore((s) => s.roomCode);
+  const currentPhase = useSimulatorStore((s) => s.currentPhase);
+  const currentRound = useSimulatorStore((s) => s.currentRound);
+  const autoMode = useSimulatorStore((s) => s.autoMode);
+  const setAutoMode = useSimulatorStore((s) => s.setAutoMode);
+  const disconnectAll = useSimulatorStore((s) => s.disconnectAll);
+  const selectPlayer = useSimulatorStore((s) => s.selectPlayer);
+  const selectedPlayerId = useSimulatorStore((s) => s.selectedPlayerId);
+  const error = useSimulatorStore((s) => s.error);
+  const clearError = useSimulatorStore((s) => s.clearError);
+
+  // ---- Game store ----
+  const setView = useGameStore((s) => s.setView);
+
+  // ---- Local state ----
+  const [activeTab, setActiveTab] = useState<'player' | 'judge'>('player');
+  const [strategyCollapsed, setStrategyCollapsed] = useState(false);
+  const prevSelectedPlayerRef = useRef<string | null>(null);
+
+  // ---- 连接数统计 ----
+  const connectedCount = Array.from(connections.values()).filter(
+    (c) => c.isConnected && !c.isJudge,
+  ).length;
+  const totalCount = Array.from(connections.values()).filter((c) => !c.isJudge).length;
+
+  // ---- Tab 切换逻辑 ----
+  const handleTabChange = useCallback(
+    (tab: 'player' | 'judge') => {
+      if (tab === activeTab) return;
+
+      if (tab === 'judge') {
+        // 切换到法官控制台：记住当前选中的玩家，注入法官状态
+        prevSelectedPlayerRef.current = selectedPlayerId;
+        selectPlayer(null);
+      } else {
+        // 切换到玩家操作：恢复之前选中的玩家
+        selectPlayer(prevSelectedPlayerRef.current);
+      }
+
+      setActiveTab(tab);
+    },
+    [activeTab, selectedPlayerId, selectPlayer],
+  );
+
+  // ---- 返回主页 ----
+  const handleBack = useCallback(() => {
+    disconnectAll();
+    setView('home');
+  }, [disconnectAll, setView]);
+
+  // ---- 组件卸载时清理 ----
+  useEffect(() => {
+    return () => {
+      disconnectAll();
+    };
+  }, [disconnectAll]);
+
+  // ---- Setup 阶段：显示 RoomSetupPanel ----
+  if (simulatorPhase === 'setup') {
+    return (
+      <div className="flex h-full flex-col bg-gray-900 text-white">
+        {/* Toolbar */}
+        <div className="flex items-center gap-3 border-b border-gray-700 bg-gray-800 px-4 py-2">
+          <button
+            onClick={handleBack}
+            className="rounded px-3 py-1 text-sm text-gray-300 hover:bg-gray-700 hover:text-white"
+          >
+            ← 返回
+          </button>
+          <h1 className="text-sm font-semibold text-gray-200">狼人杀模拟器</h1>
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-xs text-gray-400">服务器:</span>
+            <input
+              type="text"
+              value={serverUrl}
+              onChange={(e) => setServerUrl(e.target.value)}
+              className="h-7 w-56 rounded border border-gray-600 bg-gray-900 px-2 text-xs text-gray-200 outline-none focus:border-blue-500"
+              placeholder="ws://localhost:3001"
+            />
+          </div>
+        </div>
+
+        {/* Setup panel */}
+        <div className="flex flex-1 items-start justify-center overflow-auto p-6">
+          <RoomSetupPanel />
+        </div>
+      </div>
+    );
+  }
+
+  // ---- 游戏/大厅阶段 ----
+  return (
+    <div className="flex h-full flex-col bg-gray-900 text-white">
+      {/* ===== Toolbar ===== */}
+      <div className="flex flex-wrap items-center gap-3 border-b border-gray-700 bg-gray-800 px-4 py-2">
+        <button
+          onClick={handleBack}
+          className="rounded px-3 py-1 text-sm text-gray-300 hover:bg-gray-700 hover:text-white"
+        >
+          ← 返回
+        </button>
+        <h1 className="text-sm font-semibold text-gray-200">狼人杀模拟器</h1>
+
+        <div className="mx-2 h-4 w-px bg-gray-600" />
+
+        {/* 服务器地址 */}
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-gray-400">服务器:</span>
+          <input
+            type="text"
+            value={serverUrl}
+            onChange={(e) => setServerUrl(e.target.value)}
+            className="h-7 w-48 rounded border border-gray-600 bg-gray-900 px-2 text-xs text-gray-200 outline-none focus:border-blue-500"
+            placeholder="ws://localhost:3001"
+          />
+        </div>
+
+        {/* 连接数 */}
+        <span className="rounded bg-gray-700 px-2 py-0.5 text-xs text-gray-300">
+          连接: {connectedCount}/{totalCount}
+        </span>
+
+        <div className="mx-2 h-4 w-px bg-gray-600" />
+
+        {/* 自动模式 */}
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs text-gray-400">自动模式:</span>
+          <select
+            value={autoMode}
+            onChange={(e) => setAutoMode(e.target.value as typeof autoMode)}
+            className="h-7 rounded border border-gray-600 bg-gray-900 px-2 text-xs text-gray-200 outline-none focus:border-blue-500"
+          >
+            {AUTO_MODE_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>
+                {opt.label}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        {/* 断开全部 */}
+        <button
+          onClick={handleBack}
+          className="ml-auto rounded bg-red-800 px-3 py-1 text-xs text-red-200 hover:bg-red-700"
+        >
+          断开全部
+        </button>
+      </div>
+
+      {/* ===== Error banner ===== */}
+      {error && (
+        <div className="flex items-center gap-2 bg-red-900/60 px-4 py-1.5 text-xs text-red-200">
+          <span className="flex-1">{error}</span>
+          <button
+            onClick={clearError}
+            className="rounded px-2 py-0.5 text-red-300 hover:bg-red-800"
+          >
+            关闭
+          </button>
+        </div>
+      )}
+
+      {/* ===== Main content ===== */}
+      <div className="flex flex-1 overflow-hidden">
+        {/* ---- Left panel (320px) ---- */}
+        <div className="flex w-80 shrink-0 flex-col border-r border-gray-700 bg-gray-850 overflow-y-auto">
+          {/* Room info card */}
+          <div className="border-b border-gray-700 p-3">
+            <h3 className="mb-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
+              房间信息
+            </h3>
+            <div className="space-y-1 text-sm">
+              <div className="flex justify-between">
+                <span className="text-gray-400">房间号</span>
+                <span className="font-mono text-yellow-300">{roomCode ?? '—'}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-400">阶段</span>
+                <span className="text-blue-300">
+                  {PHASE_NAMES[currentPhase] ?? currentPhase}
+                </span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-gray-400">轮次</span>
+                <span>{currentRound > 0 ? `第 ${currentRound} 轮` : '—'}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* SeatMap */}
+          <div className="flex-1 overflow-y-auto p-2">
+            <SeatMap />
+          </div>
+        </div>
+
+        {/* ---- Right panel (flex-1) ---- */}
+        <div className="flex flex-1 flex-col overflow-hidden">
+          {/* Tab bar */}
+          <div className="flex border-b border-gray-700 bg-gray-800">
+            <button
+              onClick={() => handleTabChange('player')}
+              className={`px-4 py-2 text-sm font-medium transition-colors ${
+                activeTab === 'player'
+                  ? 'border-b-2 border-blue-500 text-blue-400'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              玩家操作
+            </button>
+            <button
+              onClick={() => handleTabChange('judge')}
+              className={`px-4 py-2 text-sm font-medium transition-colors ${
+                activeTab === 'judge'
+                  ? 'border-b-2 border-blue-500 text-blue-400'
+                  : 'text-gray-400 hover:text-gray-200'
+              }`}
+            >
+              法官控制
+            </button>
+          </div>
+
+          {/* Tab content */}
+          <div className="flex flex-1 flex-col overflow-hidden">
+            <div className="flex-1 overflow-auto">
+              {activeTab === 'player' ? <GamePanelWrapper /> : <JudgeConsole />}
+            </div>
+
+            {/* AutoStrategyPanel - collapsible */}
+            <div className="border-t border-gray-700">
+              <button
+                onClick={() => setStrategyCollapsed((v) => !v)}
+                className="flex w-full items-center gap-1.5 bg-gray-800 px-3 py-1.5 text-xs text-gray-300 hover:bg-gray-750"
+              >
+                <span className={`transition-transform ${strategyCollapsed ? '' : 'rotate-90'}`}>
+                  ▶
+                </span>
+                <span>🤖 自动策略</span>
+                <span
+                  className={`ml-auto rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                    autoMode === 'auto'
+                      ? 'bg-green-900 text-green-300'
+                      : autoMode === 'suggest'
+                        ? 'bg-yellow-900 text-yellow-300'
+                        : 'bg-gray-700 text-gray-400'
+                  }`}
+                >
+                  {autoMode === 'auto' ? '自动' : autoMode === 'suggest' ? '建议' : '关闭'}
+                </span>
+              </button>
+              {!strategyCollapsed && <AutoStrategyPanel />}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ===== EventLog (bottom, collapsible) ===== */}
+      <EventLog />
+    </div>
+  );
+};
+
+export default SimulatorView;
