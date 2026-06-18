@@ -80,7 +80,7 @@ export const ROLE_META: Record<RoleId, RoleMeta> = {
     id: 'hunter',
     name: '猎人',
     faction: 'good',
-    description: '死亡时可开枪带走一名玩家（被毒死时视村规而定）',
+    description: '死亡时可开枪带走一名玩家（可带人的死因由村规配置）',
   },
   guard: {
     id: 'guard',
@@ -293,6 +293,24 @@ export type DaytimeKillSequence = 'TRIGGER_ALL' | 'TRIGGER_DEFERRED';
 export type WerewolfSharedVision = 'ALL_SHARE' | 'LEADER_ONLY' | 'NONE';
 
 /**
+ * 猎人死亡可开枪的死因列表
+ * 法官可多选：哪些死因下猎人可以发动带人技能
+ * - witch_poison: 被女巫毒杀时可开枪
+ * - werewolf_kill: 被狼人击杀时可开枪
+ * - vote_out: 被投票出局时可开枪
+ */
+export type HunterDeathShootCause = 'witch_poison' | 'werewolf_kill' | 'vote_out';
+
+/**
+ * 猎人死亡可开枪死因中文名称映射
+ */
+export const HUNTER_DEATH_SHOOT_CAUSE_NAMES: Record<HunterDeathShootCause, string> = {
+  witch_poison: '女巫毒',
+  werewolf_kill: '狼人刀',
+  vote_out: '投票驱逐',
+};
+
+/**
  * 动态村规配置 — 游戏的完整规则引擎配置对象
  *
  * 设计理念：
@@ -336,6 +354,9 @@ export interface RuleConfig {
 
   /** 吃毒是否封印技能（同时作用于猎人和狼王） */
   poisonBlockGun: boolean;
+
+  /** 猎人死亡可开枪的死因列表（多选），默认全部可选 */
+  hunterDeathShootCauses: HunterDeathShootCause[];
 
   /** 骑士决斗狼王冲突结算 */
   knightDuelWolfKing: KnightDuelWolfKingRule;
@@ -439,6 +460,7 @@ export function createDefaultRuleConfig(playerCount: number = 12): RuleConfig {
     witchCanUseBothPotions: true,
     guardWitchConflict: 'DEATH',
     poisonBlockGun: false,
+    hunterDeathShootCauses: ['witch_poison', 'werewolf_kill', 'vote_out'],
     knightDuelWolfKing: 'CAN_SHOOT',
     knightDuelSuicide: 'SUICIDE',
     tieVoteResolution: 'PK_VOTE',

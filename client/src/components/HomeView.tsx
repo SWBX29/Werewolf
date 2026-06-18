@@ -31,8 +31,9 @@ import type {
   WerewolfSharedVision,
   SpeechOrderStrategy,
   RevealIdentityOnDayVote,
+  HunterDeathShootCause,
 } from '@langrensha/shared';
-import { ROLE_META, NIGHT_ACTION_ORDER_PRESETS } from '@langrensha/shared';
+import { ROLE_META, NIGHT_ACTION_ORDER_PRESETS, HUNTER_DEATH_SHOOT_CAUSE_NAMES } from '@langrensha/shared';
 
 // ============================================================================
 // 角色池配置项
@@ -468,15 +469,41 @@ const HomeView: React.FC = () => {
               </select>
             </div>
 
-            {/* 吃毒封印技能 */}
+            {/* 吃毒封印技能（仅狼王） */}
             <div className="flex items-center justify-between">
-              <span className="text-sm">吃毒封印技能（猎人/狼王）</span>
+              <span className="text-sm">吃毒封印技能（狼王）</span>
               <input
                 type="checkbox"
                 checked={ruleConfig.poisonBlockGun}
                 onChange={(e) => updateRuleConfig({ poisonBlockGun: e.target.checked })}
                 className="accent-wolf-500 w-4 h-4"
               />
+            </div>
+
+            {/* 猎人死亡带人配置 */}
+            <div className="space-y-2">
+              <span className="text-sm">猎人死亡可带人（多选）</span>
+              <div className="flex flex-wrap gap-2">
+                {(['witch_poison', 'werewolf_kill', 'vote_out'] as HunterDeathShootCause[]).map((cause) => {
+                  const isSelected = ruleConfig.hunterDeathShootCauses.includes(cause);
+                  return (
+                    <label key={cause} className="flex items-center gap-1 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => {
+                          const newList = isSelected
+                            ? ruleConfig.hunterDeathShootCauses.filter((c) => c !== cause)
+                            : [...ruleConfig.hunterDeathShootCauses, cause];
+                          updateRuleConfig({ hunterDeathShootCauses: newList });
+                        }}
+                        className="accent-wolf-500 w-4 h-4"
+                      />
+                      <span className="text-xs text-gray-300">{HUNTER_DEATH_SHOOT_CAUSE_NAMES[cause]}</span>
+                    </label>
+                  );
+                })}
+              </div>
             </div>
 
             {/* 女巫同晚双药 */}

@@ -1,5 +1,7 @@
 import React, { useState } from 'react';
 import { useGameStore } from '../../../useGameStore';
+import type { DeathCause, HunterDeathShootCause } from '@langrensha/shared';
+import { HUNTER_DEATH_SHOOT_CAUSE_NAMES } from '@langrensha/shared';
 import TargetSelector from '../TargetSelector';
 import CountdownTimer from '../CountdownTimer';
 import ConfirmDialog from '../ConfirmDialog';
@@ -25,19 +27,23 @@ const HunterGun: React.FC = () => {
   // 已开枪则不再显示
   if (gunFired) return null;
 
-  // Bug 8 修复：使用 deathCause 判断是否被毒死，而非 status
-  // 服务端可能将所有死亡玩家状态设为 'dead'，需要通过 deathCause 区分死因
-  const isPoisoned = myPlayer.deathCause === 'witch_poison';
-  const poisonBlockGun = ruleConfig.poisonBlockGun;
+  // 猎人死亡可开枪检查：根据 hunterDeathShootCauses 配置判断
+  // 可配置的死因：witch_poison / werewolf_kill / vote_out
+  // 其他死因默认允许开枪
+  const deathCause = myPlayer.deathCause;
+  const configurableCauses: DeathCause[] = ['witch_poison', 'werewolf_kill', 'vote_out'];
+  const isConfigurable = deathCause ? configurableCauses.includes(deathCause) : false;
+  const canShoot = !isConfigurable || (deathCause !== null && ruleConfig.hunterDeathShootCauses.includes(deathCause as HunterDeathShootCause));
 
-  // 被毒死且规则封印枪 → 显示无法开枪提示
-  if (isPoisoned && poisonBlockGun) {
+  if (!canShoot) {
+    // 找到被禁止的死因中文名
+    const blockedCauseName = deathCause ? HUNTER_DEATH_SHOOT_CAUSE_NAMES[deathCause as HunterDeathShootCause] ?? '当前死因' : '当前死因';
     return (
       <div className="skill-panel p-4 space-y-3">
         <h3 className="text-lg font-bold text-red-400">🔫 猎人开枪</h3>
         <div className="text-center space-y-2">
-          <p className="text-red-300">你被毒死，无法开枪</p>
-          <p className="text-xs text-gray-500">当前村规：被毒死时封印开枪技能</p>
+          <p className="text-red-300">你无法开枪</p>
+          <p className="text-xs text-gray-500">当前村规：被{blockedCauseName}时不可开枪</p>
         </div>
       </div>
     );

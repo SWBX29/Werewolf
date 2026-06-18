@@ -1426,13 +1426,19 @@ export class GameEngine {
         player.deathRound = this.state.round;
 
         // ---- 毒封技能逻辑 ----
-        // 如果 poisonBlockGun 为 true，被毒死的猎人和狼王不能开枪
+        // 如果 poisonBlockGun 为 true，被毒死的狼王不能开枪
+        // 猎人使用 hunterDeathShootCauses 配置判断
         if (config.poisonBlockGun && death.cause === 'witch_poison') {
-          if (player.role === 'hunter') {
-            player.hunterGunFired = true; // 标记为已开枪（实际是封印，不能再开枪）
-          }
           if (player.role === 'wolf_king') {
             player.wolfKingGunFired = true; // 同理封印
+          }
+        }
+        // 猎人：如果当前死因是可配置项且不在 hunterDeathShootCauses 中，封印开枪
+        if (player.role === 'hunter') {
+          const configurableCauses: DeathCause[] = ['witch_poison', 'werewolf_kill', 'vote_out'];
+          const isConfigurable = configurableCauses.includes(death.cause);
+          if (isConfigurable && !config.hunterDeathShootCauses.includes(death.cause as any)) {
+            player.hunterGunFired = true; // 封印开枪
           }
         }
       }
@@ -2375,9 +2381,13 @@ export class GameEngine {
 
         // ---- 猎人开枪 ----
         if (player.role === 'hunter' && !player.hunterGunFired) {
-          // 毒封技能检查：如果被毒死且 poisonBlockGun 为 true，不能开枪
-          const isPoisoned = player.deathCause === 'witch_poison';
-          if (!(isPoisoned && config.poisonBlockGun)) {
+          // 猎人死亡可开枪检查：根据 hunterDeathShootCauses 配置判断
+          // 可配置的死因：witch_poison / werewolf_kill / vote_out
+          // 其他死因（如 wolf_king_gun、white_wolf_explode 等）默认允许开枪
+          const configurableCauses: DeathCause[] = ['witch_poison', 'werewolf_kill', 'vote_out'];
+          const isConfigurable = configurableCauses.includes(player.deathCause!);
+          const canShoot = !isConfigurable || config.hunterDeathShootCauses.includes(player.deathCause as any);
+          if (canShoot) {
             // 通知客户端猎人可以开枪
             this.onGameEvent(this.state.roomCode, 'HUNTER_CAN_SHOOT', {
               seatNumber: player.seatNumber,
@@ -2780,8 +2790,10 @@ export class GameEngine {
     // 此处仅做日志记录
     if (deadPlayer.role === 'hunter' || (deadPlayer.role === 'mechanical_wolf' && deadPlayer.mechanicalWolfImitatedRole === 'hunter')) {
       if (!deadPlayer.hunterGunFired) {
-        const isPoisoned = deadPlayer.deathCause === 'witch_poison';
-        if (!(isPoisoned && this.state.config.poisonBlockGun)) {
+        const configurableCauses: DeathCause[] = ['witch_poison', 'werewolf_kill', 'vote_out'];
+        const isConfigurable = configurableCauses.includes(deadPlayer.deathCause!);
+        const canShoot = !isConfigurable || this.state.config.hunterDeathShootCauses.includes(deadPlayer.deathCause as any);
+        if (canShoot) {
           this.logAction({
             actorSeat: deadPlayer.seatNumber,
             actorNickname: deadPlayer.nickname,
@@ -2840,9 +2852,13 @@ export class GameEngine {
     if (hunter.hunterGunFired) return { success: false, error: '你已经开过枪了' };
     if (hunter.status !== 'dead') return { success: false, error: '你还没有死亡' };
 
-    // 毒封检查
-    if (this.state.config.poisonBlockGun && hunter.deathCause === 'witch_poison') {
-      return { success: false, error: '你被毒死，无法开枪' };
+    // 猎人死亡可开枪检查：根据 hunterDeathShootCauses 配置判断
+    // 可配置的死因：witch_poison / werewolf_kill / vote_out
+    // 其他死因默认允许开枪
+    const configurableCauses: DeathCause[] = ['witch_poison', 'werewolf_kill', 'vote_out'];
+    const isConfigurable = configurableCauses.includes(hunter.deathCause!);
+    if (isConfigurable && !this.state.config.hunterDeathShootCauses.includes(hunter.deathCause as any)) {
+      return { success: false, error: '你因该死因无法开枪' };
     }
 
     const target = this.getPlayerBySeat(targetSeat);
