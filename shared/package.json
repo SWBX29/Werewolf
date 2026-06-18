@@ -1,0 +1,14 @@
+{
+  "name": "@langrensha/shared",
+  "version": "1.0.0",
+  "private": true,
+  "sideEffects": false,
+  "main": "dist/types.js",
+  "types": "dist/types.d.ts",
+  "scripts": {
+    "build": "tsc"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5"
+  }
+}

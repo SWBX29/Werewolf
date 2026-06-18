@@ -1,0 +1,13 @@
+- [x] RuleConfig 接口包含 `firstDayDoubleSpeech: boolean` 字段，默认值为 `false`
+- [x] createDefaultRuleConfig 函数包含 `firstDayDoubleSpeech: false` 默认值
+- [x] 游戏状态包含 `currentSpeechRound: number` 字段
+- [x] RoomState Schema 包含 `firstDayDoubleSpeech` 和 `currentSpeechRound` 字段
+- [x] 首日（round === 1）第一轮发言结束后，若 `firstDayDoubleSpeech` 为 true，自动进入第二轮发言
+- [x] 第二轮发言使用 calculateSpeechOrder() 重新计算发言顺序
+- [x] 第二轮发言结束后正常进入投票前等待阶段
+- [x] 非首日或配置关闭时，行为与原来一致（单轮发言）
+- [x] 进入第二轮发言时写入 SECOND_SPEECH_ROUND_START 日志
+- [x] 服务端状态广播包含 currentSpeechRound 字段
+- [x] 创建房间 UI 包含"首日双轮发言"开关
+- [x] 客户端发言阶段在首日双轮发言时显示"第1轮发言"/"第2轮发言"
+- [x] 法官控制台在第二轮发言时正常工作（跳过、结束发言等操作）

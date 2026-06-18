@@ -1,0 +1,26 @@
+{
+  "name": "@langrensha/server",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@langrensha/shared": "*",
+    "@types/compression": "^1.8.1",
+    "compression": "^1.8.1",
+    "dotenv": "^16.4.5",
+    "mongoose": "^8.3.2",
+    "qrcode": "^1.5.3",
+    "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.12.7",
+    "@types/qrcode": "^1.5.5",
+    "@types/ws": "^8.5.10",
+    "tsx": "^4.7.3",
+    "typescript": "^5.4.5"
+  }
+}
