@@ -42,9 +42,9 @@
 |------|------|
 | 前端框架 | React 18 + TypeScript |
 | 状态管理 | Zustand |
-| 后端框架 | Node.js + Koa |
+| 后端框架 | Node.js + 原生 http 模块 |
 | 数据库 | MongoDB (Mongoose) |
-| 实时通信 | WebSocket |
+| 实时通信 | WebSocket (ws 库) |
 | 语音服务 | ZEGO SDK |
 | 构建工具 | Vite |
 
@@ -65,7 +65,7 @@
 │         ▼                ▼                    ▼                  │
 │  ┌─────────────────────────────────────────────────────────────┐│
 │  │              @langrensha/shared (共享类型层)                 ││
-│  │   types.ts, constants.ts, utils.ts, ROLE_META, RuleConfig   ││
+│  │   types.ts, types/zego.ts, ROLE_META, RuleConfig            ││
 │  └─────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────┘
                               │
@@ -74,7 +74,7 @@
 ┌─────────────────────────────────────────────────────────────────┐
 │                        服务端 (Server)                           │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────────────────┐  │
-│  │  Koa HTTP   │  │ WebSocket   │  │      LobbyManager       │  │
+│  │  HTTP       │  │ WebSocket   │  │      LobbyManager       │  │
 │  │  Server     │──│  Handler    │──│   (房间生命周期管理)      │  │
 │  └─────────────┘  └─────────────┘  └─────────────────────────┘  │
 │         │                │                    │                  │
@@ -167,7 +167,7 @@ langrensha/
 │
 ├── server/                     # 后端应用
 │   ├── src/
-│   │   ├── server.ts           # Koa 服务器入口
+│   │   ├── server.ts           # HTTP + WebSocket 服务器入口
 │   │   ├── GameEngine.ts       # 游戏状态机引擎
 │   │   ├── LobbyManager.ts     # 大厅与房间管理器
 │   │   ├── SettlementEngine.ts # 结算引擎
@@ -182,9 +182,9 @@ langrensha/
 │   └── tsconfig.json
 │
 ├── shared/                     # 共享类型定义
-│   ├── types.ts                # 全局类型定义（角色、规则、状态）
-│   ├── constants.ts            # 常量定义（房间码字符集等）
-│   ├── utils.ts                # 共享工具函数
+│   ├── types.ts                # 全局类型定义（角色、规则、状态、常量）
+│   ├── types/
+│   │   └── zego.ts             # ZEGO 语音相关类型
 │   └── package.json
 │
 ├── package.json                # Monorepo 根配置
@@ -200,10 +200,10 @@ langrensha/
 
 #### [server.ts](file:///e:/GitHub/langrensha/server/src/server.ts)
 
-**职责**：Koa HTTP 服务器入口，WebSocket 处理，消息路由
+**职责**：HTTP + WebSocket 服务器入口，消息路由
 
 **核心功能**：
-- 初始化 Koa 服务器和 WebSocket
+- 初始化 HTTP 服务器和 WebSocket
 - 连接 MongoDB 数据库
 - 处理客户端消息路由
 - 广播服务端消息到房间
@@ -251,8 +251,11 @@ interface ClientContext {
   nickname: string;
   roomCode: string | null;
   isJudge: boolean;
+  connectedAt: number;
   disconnected: boolean;
+  disconnectedAt: number | null;
   gracePeriodTimer: ReturnType<typeof setTimeout> | null;
+  origin: string;
 }
 ```
 
@@ -263,8 +266,11 @@ interface ClientContext {
 **核心功能**：
 - `checkWinCondition()` - 检查游戏获胜条件（屠边/屠城）
 - `resolveDeathChain()` - 解析死亡连锁（猎人/狼王开枪）
-- `canBeNightmareFeared()` - 判断是否可被恐惧
-- `isGuardProtectionValid()` - 判断守卫守护是否有效
+- `calculateSpeechOrder()` - 计算发言顺序
+- `resolveVoteResult()` - 解析投票结果
+- `canMechanicalWolfActAsWolf()` - 判断机械狼是否可作为狼人行动
+- `isMechanicalWolfImitationFailed()` - 判断机械狼模仿是否失败
+- `getMechanicalWolfSeerResult()` - 获取机械狼被预言家查验结果
 
 **设计原则**：
 - 纯函数：无副作用，便于测试
@@ -494,13 +500,27 @@ function checkWinCondition(
 // 解析死亡连锁
 function resolveDeathChain(deadPlayer: Player): DeathChainResult;
 
-// 判断守卫守护有效性
-function isGuardProtectionValid(
-  guardSeat: number,
-  targetSeat: number,
-  lastGuardedSeat: number | null,
-  round: number
-): { valid: boolean; reason?: string };
+// 计算发言顺序
+function calculateSpeechOrder(
+  players: Player[],
+  strategy: SpeechOrderStrategy,
+  ...
+): number[];
+
+// 解析投票结果
+function resolveVoteResult(
+  votes: Record<number, number>,
+  ...
+): VoteResult;
+
+// 判断机械狼是否可作为狼人行动
+function canMechanicalWolfActAsWolf(player: Player): boolean;
+
+// 判断机械狼模仿是否失败
+function isMechanicalWolfImitationFailed(player: Player): boolean;
+
+// 获取机械狼被预言家查验结果
+function getMechanicalWolfSeerResult(player: Player): Faction;
 ```
 
 ### 5.3 共享类型函数
@@ -558,8 +578,17 @@ function createDefaultRuleConfig(playerCount?: number): RuleConfig;
 | `JUDGE_FORCE_NEXT_PHASE` | 法官强制推进阶段 | - |
 | `JUDGE_PAUSE` | 法官暂停游戏 | - |
 | `JUDGE_RESUME` | 法官恢复游戏 | - |
+| `JUDGE_MODIFY_SPEECH_ORDER` | 法官修改发言顺序 | order |
+| `JUDGE_TRIGGER_KNIGHT_DUEL` | 法官代操作：触发骑士决斗 | knightSeat, targetSeat |
+| `JUDGE_TRIGGER_WHITE_WOLF` | 法官代操作：触发白狼王自爆 | wolfSeat, targetSeat |
+| `JUDGE_SKIP_SPEECH` | 法官跳过某玩家发言 | seatNumber |
 | `UPDATE_NIGHT_ORDER` | 法官修改夜间顺序 | newOrder |
+| `DEAD_CHAT` | 死亡玩家聊天 | content |
+| `APPEAL` | 玩家申诉仲裁 | eventId |
+| `ARBITRATION_VOTE` | 仲裁投票 | eventId, support |
 | `ADMIN_FETCH_LOGS` | 管理员查询日志 | secret, roomCode, fromTime, toTime, ... |
+| `ADMIN_CLEANUP_CONFIG` | 管理员清除旧配置 | secret |
+| `PING` | 心跳消息 | - |
 
 #### 服务端消息 (`ServerMessage`)
 
@@ -567,24 +596,44 @@ function createDefaultRuleConfig(playerCount?: number): RuleConfig;
 |------|------|------|
 | `ROOM_CREATED` | 房间创建成功 | roomCode, inviteLink, qrCodeDataUrl |
 | `ROOM_STATE` | 房间状态推送 | state (PlayerRoomStateDTO / JudgeRoomStateDTO) |
-| `PHASE_CHANGE` | 阶段变更 | phase, round |
+| `PHASE_CHANGE` | 阶段变更 | phase, nightSubPhase, round |
 | `NIGHT_ACTION_REQUEST` | 夜间行动请求 | request |
 | `NIGHT_ACTION_RESULT` | 夜间行动结果 | seerResult, ... |
 | `DAY_ANNOUNCE` | 天亮公告 | deaths, mutedSeats |
 | `VOTE_RESULT` | 投票结果 | votes, eliminated, isPK, pkCandidates |
 | `KNIGHT_DUEL_RESULT` | 骑士决斗结果 | targetIsWolf, knightDied, ... |
+| `WHITE_WOLF_EXPLODE_RESULT` | 白狼王自爆结果 | wolfSeat, targetSeat, ... |
+| `HUNTER_GUN_RESULT` | 猎人开枪结果 | hunterSeat, targetSeat, ... |
+| `WOLF_KING_GUN_RESULT` | 狼王开枪结果 | wolfKingSeat, targetSeat, ... |
+| `IDIOT_REVEAL` | 白痴翻牌 | seatNumber, ... |
 | `GAME_OVER` | 游戏结束 | winner, round, players |
 | `ROOM_DISSOLVED` | 房间解散 | reason, players |
 | `RECONNECT_SUCCESS` | 重连成功 | playerId, roomCode |
 | `ERROR` | 错误消息 | code, message |
 | `JUDGE_WARNING` | 法官警告 | warningType, message, data |
+| `JUDGE_ACTION` | 法官操作通知 | action, ... |
+| `SPEECH_ORDER_UPDATE` | 发言顺序更新 | order |
+| `PLAYER_JOINED` | 玩家加入房间 | player |
+| `PLAYER_LEFT` | 玩家离开房间 | seatNumber, nickname |
+| `PLAYER_READY` | 玩家准备状态变更 | seatNumber, isReady |
+| `PHASE_REMINDER` | 阶段提醒 | message |
 | `WOLF_CHAT_HISTORY` | 狼人聊天历史 | messages |
 | `WOLF_VOTE_UPDATE` | 狼人投票更新 | votes, consensus, lockedTarget |
+| `WOLF_PHASE_SKIPPED` | 狼人阶段跳过 | reason |
 | `NIGHT_COUNTDOWN` | 夜间倒计时 | roleId, remaining |
 | `SPEECH_COUNTDOWN` | 发言倒计时 | seatNumber, remaining |
+| `SPEECH_CONTENT` | 发言内容 | seatNumber, content |
+| `DAY_VOTE_REVEAL` | 白天投票揭示 | votes |
 | `SHERIFF_ELECTED` | 警长当选 | seatNumber, nickname |
+| `SHERIFF_ELECTION_TIE` | 警长选举平票 | tiedSeats |
 | `SHERIFF_TRANSFER_REQUEST` | 警徽移交请求 | deadSheriffSeat, availableTargets, timeout |
 | `SHERIFF_TRANSFER_RESULT` | 警徽移交结果 | fromSeat, toSeat, isTimeout |
+| `DEAD_CHAT` | 死亡玩家聊天消息 | messages |
+| `APPEAL_EVENT` | 申诉事件 | eventId, ... |
+| `ARBITRATION_VOTE` | 仲裁投票结果 | eventId, ... |
+| `ADMIN_LOGS_RESULT` | 管理员日志结果 | logs, total, page |
+| `ADMIN_CLEANUP_RESULT` | 管理员清理结果 | success, message |
+| `PONG` | 心跳响应 | - |
 
 ### 6.2 数据流图
 
@@ -613,7 +662,7 @@ function createDefaultRuleConfig(playerCount?: number): RuleConfig;
 ```
                     ┌─────────────────────────────────────┐
                     │       @langrensha/shared            │
-                    │  (types, constants, utils, ROLE_META)│
+                    │  (types.ts, types/zego.ts, ROLE_META)    │
                     └─────────────────────────────────────┘
                               │           │
               ┌───────────────┼───────────┼───────────────┐
@@ -655,11 +704,12 @@ function createDefaultRuleConfig(playerCount?: number): RuleConfig;
 
 | 包名 | 用途 |
 |------|------|
-| `koa` | HTTP 服务器框架 |
-| `koa-router` | 路由 |
-| `koa-bodyparser` | 请求体解析 |
-| `ws` | WebSocket |
+| `ws` | WebSocket 库 |
 | `mongoose` | MongoDB ODM |
+| `compression` | HTTP 响应压缩 |
+| `qrcode` | 二维码生成（房间邀请） |
+| `dotenv` | 环境变量管理 |
+| `tsx` | TypeScript 开发运行 |
 | `typescript` | 类型系统 |
 
 ---

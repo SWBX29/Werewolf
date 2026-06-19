@@ -22,6 +22,7 @@ export default function SeerPanel() {
 
   const [selected, setSelected] = useState<number | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   if (!nightActionRequest) return null;
 
@@ -31,7 +32,8 @@ export default function SeerPanel() {
   };
 
   const handleConfirmAction = () => {
-    if (selected === null || isActionLocked) return;
+    if (selected === null || isActionLocked || isSubmitting) return;
+    setIsSubmitting(true);
     submitNightAction('seer', selected, { checkTarget: selected });
     setActionLocked(true);
     setConfirmOpen(false);

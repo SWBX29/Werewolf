@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useRef, useState, useEffect, useCallback } from 'react';
 import { useSimulatorStore } from './useSimulatorStore';
 import { ROLE_META, PHASE_NAMES, isEvilRole, isGodRole, type RoleId, type Player } from '@langrensha/shared';
 import type { SimConnection } from './types';
@@ -7,19 +7,20 @@ import type { SimConnection } from './types';
 // 常量
 // ============================================================================
 
-const CIRCLE_RADIUS = 200;
 const SEAT_SIZE = 80;
-const CONTAINER_SIZE = CIRCLE_RADIUS * 2 + SEAT_SIZE * 2 + 40;
+const MIN_CONTAINER = 300;
+const MAX_CONTAINER = 600;
 
 // ============================================================================
 // 辅助函数
 // ============================================================================
 
 /** 计算环形座位坐标 */
-function getSeatPosition(index: number, total: number) {
+function getSeatPosition(index: number, total: number, containerSize: number) {
+  const radius = (containerSize - SEAT_SIZE * 2 - 40) / 2;
   const angle = (index / total) * 2 * Math.PI - Math.PI / 2;
-  const x = CONTAINER_SIZE / 2 + CIRCLE_RADIUS * Math.cos(angle) - SEAT_SIZE / 2;
-  const y = CONTAINER_SIZE / 2 + CIRCLE_RADIUS * Math.sin(angle) - SEAT_SIZE / 2;
+  const x = containerSize / 2 + radius * Math.cos(angle) - SEAT_SIZE / 2;
+  const y = containerSize / 2 + radius * Math.sin(angle) - SEAT_SIZE / 2;
   return { x, y };
 }
 
@@ -48,6 +49,7 @@ interface SeatProps {
   player: Player | undefined;
   isSelected: boolean;
   isCurrentActor: boolean;
+  isLobby: boolean;
   onClick: () => void;
 }
 
@@ -57,9 +59,11 @@ const Seat = React.memo(function Seat({
   isSelected,
   isCurrentActor,
   onClick,
+  isLobby,
 }: SeatProps) {
   const isDead = player?.status === 'dead' || player?.status === 'poisoned' || player?.status === 'voted_out';
-  const role: RoleId | null = connection.role ?? player?.role ?? null;
+  // LOBBY 阶段不显示角色（服务器默认角色为 villager，无意义）
+  const role: RoleId | null = isLobby ? null : (connection.role ?? player?.role ?? null);
   const roleName = role ? ROLE_META[role].name : '???';
   const nickname = connection.nickname || `玩家${connection.seatNumber}`;
   const seatNumber = connection.seatNumber ?? '?';
@@ -149,14 +153,17 @@ const JudgeBadge = React.memo(function JudgeBadge({ connection }: { connection: 
 
 interface StatsBarProps {
   players: Player[];
+  isLobby: boolean;
 }
 
-const StatsBar = React.memo(function StatsBar({ players }: StatsBarProps) {
+const StatsBar = React.memo(function StatsBar({ players, isLobby }: StatsBarProps) {
   const alive = players.filter(p => p.status === 'alive').length;
   const dead = players.filter(p => p.status !== 'alive').length;
-  const goodAlive = players.filter(p => p.status === 'alive' && !isEvilRole(p.role)).length;
-  const evilAlive = players.filter(p => p.status === 'alive' && isEvilRole(p.role)).length;
   const sheriff = players.find(p => p.isSheriff);
+
+  // LOBBY 阶段不显示阵营信息（角色未分配）
+  const goodAlive = isLobby ? null : players.filter(p => p.status === 'alive' && !isEvilRole(p.role)).length;
+  const evilAlive = isLobby ? null : players.filter(p => p.status === 'alive' && isEvilRole(p.role)).length;
 
   return (
     <div className="flex flex-wrap items-center justify-center gap-4 text-xs">
@@ -166,12 +173,16 @@ const StatsBar = React.memo(function StatsBar({ players }: StatsBarProps) {
       <span className="rounded bg-red-900/40 px-2 py-1 text-red-300">
         死亡: {dead}
       </span>
-      <span className="rounded bg-blue-900/40 px-2 py-1 text-blue-300">
-        好人: {goodAlive}
-      </span>
-      <span className="rounded bg-red-900/40 px-2 py-1 text-red-400">
-        狼人: {evilAlive}
-      </span>
+      {!isLobby && goodAlive !== null && (
+        <span className="rounded bg-blue-900/40 px-2 py-1 text-blue-300">
+          好人: {goodAlive}
+        </span>
+      )}
+      {!isLobby && evilAlive !== null && (
+        <span className="rounded bg-red-900/40 px-2 py-1 text-red-400">
+          狼人: {evilAlive}
+        </span>
+      )}
       {sheriff && (
         <span className="rounded bg-yellow-900/40 px-2 py-1 text-yellow-300">
           警长: {sheriff.seatNumber}号
@@ -192,6 +203,28 @@ const SeatMap = React.memo(function SeatMap() {
   const currentPhase = useSimulatorStore(s => s.currentPhase);
   const nightSubPhase = useSimulatorStore(s => s.nightSubPhase);
   const selectPlayer = useSimulatorStore(s => s.selectPlayer);
+
+  // 响应式容器尺寸
+  const containerRef = useRef<HTMLDivElement>(null);
+  const [containerSize, setContainerSize] = useState(MIN_CONTAINER);
+
+  const updateSize = useCallback(() => {
+    if (containerRef.current) {
+      const w = containerRef.current.parentElement?.clientWidth ?? MIN_CONTAINER;
+      const h = containerRef.current.parentElement?.clientHeight ?? MIN_CONTAINER;
+      const size = Math.max(MIN_CONTAINER, Math.min(MAX_CONTAINER, Math.min(w, h) - 16));
+      setContainerSize(size);
+    }
+  }, []);
+
+  useEffect(() => {
+    updateSize();
+    const observer = new ResizeObserver(updateSize);
+    if (containerRef.current?.parentElement) {
+      observer.observe(containerRef.current.parentElement);
+    }
+    return () => observer.disconnect();
+  }, [updateSize]);
 
   // 分离法官和玩家连接，按座位号排序
   const { judgeConn, playerConns } = useMemo(() => {
@@ -224,12 +257,14 @@ const SeatMap = React.memo(function SeatMap() {
   // 当前行动角色
   const currentActorRole = nightSubPhase?.currentRole ?? null;
 
+  const isLobby = currentPhase === 'LOBBY';
+
   return (
-    <div className="flex flex-col items-center gap-4">
+    <div ref={containerRef} className="flex flex-col items-center gap-4">
       {/* 环形座位区域 */}
       <div
-        className="relative"
-        style={{ width: CONTAINER_SIZE, height: CONTAINER_SIZE }}
+        className="relative shrink-0"
+        style={{ width: containerSize, height: containerSize }}
       >
         {/* 中心装饰 */}
         <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 flex flex-col items-center gap-1">
@@ -243,7 +278,7 @@ const SeatMap = React.memo(function SeatMap() {
 
         {/* 座位 */}
         {playerConns.map((conn, i) => {
-          const pos = getSeatPosition(i, playerConns.length);
+          const pos = getSeatPosition(i, playerConns.length, containerSize);
           const player = playerMap.get(conn.seatNumber ?? 0);
           const isCurrentActor = currentActorRole !== null && conn.role === currentActorRole;
 
@@ -254,6 +289,7 @@ const SeatMap = React.memo(function SeatMap() {
                 player={player}
                 isSelected={selectedPlayerId === conn.playerId}
                 isCurrentActor={isCurrentActor}
+                isLobby={isLobby}
                 onClick={() => selectPlayer(conn.playerId)}
               />
             </div>
@@ -265,7 +301,7 @@ const SeatMap = React.memo(function SeatMap() {
       {judgeConn && <JudgeBadge connection={judgeConn} />}
 
       {/* 统计栏 */}
-      {judgeState?.players && <StatsBar players={judgeState.players} />}
+      {judgeState?.players && <StatsBar players={judgeState.players} isLobby={isLobby} />}
     </div>
   );
 });

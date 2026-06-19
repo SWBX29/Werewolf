@@ -27,7 +27,7 @@ export default function EventLog() {
 
   const [collapsed, setCollapsed] = useState(false);
   const [filter, setFilter] = useState<CategoryFilter>('all');
-  const [height, setHeight] = useState(200);
+  const [height, setHeight] = useState(280);
   const listRef = useRef<HTMLDivElement>(null);
   const dragging = useRef(false);
   const startY = useRef(0);
@@ -71,10 +71,10 @@ export default function EventLog() {
 
   return (
     <div
-      className="flex flex-col border-t border-gray-700 bg-gray-900/95 select-none"
-      style={{ height: collapsed ? 'auto' : height }}
+      className="flex flex-col border-t border-gray-700 bg-gray-900/95 select-none shrink-0"
+      style={{ height: collapsed ? undefined : height, minHeight: collapsed ? undefined : 80 }}
     >
-      {/* Resize handle */}
+      {/* Resize handle - always visible when not collapsed */}
       {!collapsed && (
         <div
           className="h-1.5 cursor-ns-resize hover:bg-blue-500/40 active:bg-blue-500/60 transition-colors shrink-0"

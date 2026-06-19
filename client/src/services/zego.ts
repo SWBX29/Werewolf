@@ -147,6 +147,19 @@ export class ZegoVoiceService {
   }
 
   // ============================================================================
+  // 引擎就绪检查
+  // ============================================================================
+
+  /** 检查引擎是否已加载并可用 */
+  private _ensureEngine(): ZegoExpressEngineType | null {
+    if (!this._zg) {
+      console.warn('[ZegoVoice] 引擎未初始化，请先调用 init()');
+      return null;
+    }
+    return this._zg;
+  }
+
+  // ============================================================================
   // 初始化引擎
   // ============================================================================
 
@@ -361,6 +374,11 @@ export class ZegoVoiceService {
       this._remoteStreams.clear();
       this._streamUserMap.clear();
 
+      // 清理推流映射
+      if (this._publishStreamID) {
+        this._streamUserMap.delete(this._publishStreamID);
+      }
+
       // 4. 关闭音浪回调
       try {
         this._zg.setSoundLevelDelegate(false);
@@ -370,7 +388,7 @@ export class ZegoVoiceService {
 
       // 5. 退出房间
       try {
-        this._zg.logoutRoom(roomIDToLeave);
+        await this._zg.logoutRoom(roomIDToLeave);
         console.log(`[${timestamp}][ZegoVoice] 退出房间成功: ${roomIDToLeave}`);
       } catch (error) {
         console.warn(`[${timestamp}][ZegoVoice] 退出房间失败:`, error);
@@ -403,7 +421,7 @@ export class ZegoVoiceService {
     console.log(`[${timestamp}][ZegoVoice] forceCleanup 开始`);
 
     try {
-      // 停止推流
+      // 1. 停止推流
       if (this._publishStreamID && this._zg) {
         try {
           this._zg.stopPublishingStream(this._publishStreamID);
@@ -411,8 +429,9 @@ export class ZegoVoiceService {
           console.warn(`[${timestamp}][ZegoVoice] 强制清理：停止推流失败`, error);
         }
       }
+      this._publishStreamID = null;
 
-      // 销毁本地流
+      // 2. 销毁本地流
       if (this._localStream && this._zg) {
         try {
           this._zg.destroyStream(this._localStream);
@@ -420,8 +439,9 @@ export class ZegoVoiceService {
           console.warn(`[${timestamp}][ZegoVoice] 强制清理：销毁本地流失败`, error);
         }
       }
+      this._localStream = null;
 
-      // 停止所有拉流
+      // 3. 停止所有拉流
       if (this._zg) {
         for (const streamID of this._remoteStreams.keys()) {
           try {
@@ -431,11 +451,22 @@ export class ZegoVoiceService {
           }
         }
       }
+      this._remoteStreams.clear();
+      this._streamUserMap.clear();
 
-      // 尝试退出房间
+      // 4. 关闭音浪回调
+      if (this._zg) {
+        try {
+          this._zg.setSoundLevelDelegate(false);
+        } catch (error) {
+          console.warn(`[${timestamp}][ZegoVoice] 强制清理：关闭音浪回调失败`, error);
+        }
+      }
+
+      // 5. 尝试退出房间
       if (this._currentRoomID && this._zg) {
         try {
-          this._zg.logoutRoom(this._currentRoomID);
+          await this._zg.logoutRoom(this._currentRoomID);
         } catch (error) {
           console.warn(`[${timestamp}][ZegoVoice] 强制清理：退出房间失败`, error);
         }
@@ -454,6 +485,8 @@ export class ZegoVoiceService {
       this._localStream = null;
       this._remoteStreams.clear();
       this._streamUserMap.clear();
+      this._isMicrophoneMuted = false;
+      this._isSpeakerMuted = false;
       console.log(`[${timestamp}][ZegoVoice] forceCleanup 完成`);
     }
   }
@@ -474,12 +507,10 @@ export class ZegoVoiceService {
    * @param muted true 静音，false 取消静音
    */
   muteMicrophone(muted: boolean): void {
-    if (!this._zg) {
-      console.warn('[ZegoVoice] 引擎未初始化');
-      return;
-    }
+    const zg = this._ensureEngine();
+    if (!zg) return;
 
-    this._zg.muteMicrophone(muted);
+    zg.muteMicrophone(muted);
     this._isMicrophoneMuted = muted;
 
     // 通知上层
@@ -502,15 +533,13 @@ export class ZegoVoiceService {
    * @param muted true 静音，false 取消静音
    */
   muteSpeaker(muted: boolean): void {
-    if (!this._zg) {
-      console.warn('[ZegoVoice] 引擎未初始化');
-      return;
-    }
+    const zg = this._ensureEngine();
+    if (!zg) return;
 
     this._isSpeakerMuted = muted;
 
     for (const streamID of this._remoteStreams.keys()) {
-      this._zg.mutePlayStreamAudio(streamID, muted).catch((err: unknown) => {
+      zg.mutePlayStreamAudio(streamID, muted).catch((err: unknown) => {
         console.warn(`[ZegoVoice] 设置流 ${streamID} 音频静音状态失败:`, err);
       });
     }
@@ -525,9 +554,10 @@ export class ZegoVoiceService {
    * 用于：白天发言阶段只允许当前发言者说话
    */
   muteAllRemoteAudio(): void {
-    if (!this._zg) return;
+    const zg = this._ensureEngine();
+    if (!zg) return;
     for (const streamID of this._remoteStreams.keys()) {
-      this._zg.mutePlayStreamAudio(streamID, true).catch(() => {});
+      zg.mutePlayStreamAudio(streamID, true).catch(() => {});
     }
   }
 
@@ -535,9 +565,10 @@ export class ZegoVoiceService {
    * 取消静音所有远程音频流
    */
   unmuteAllRemoteAudio(): void {
-    if (!this._zg) return;
+    const zg = this._ensureEngine();
+    if (!zg) return;
     for (const streamID of this._remoteStreams.keys()) {
-      this._zg.mutePlayStreamAudio(streamID, false).catch(() => {});
+      zg.mutePlayStreamAudio(streamID, false).catch(() => {});
     }
   }
 
@@ -546,10 +577,11 @@ export class ZegoVoiceService {
    * @param userID 要静音的用户 ID
    */
   muteRemoteAudioByUserID(userID: string): void {
-    if (!this._zg) return;
+    const zg = this._ensureEngine();
+    if (!zg) return;
     for (const [streamID, mappedUserID] of this._streamUserMap.entries()) {
       if (mappedUserID === userID) {
-        this._zg.mutePlayStreamAudio(streamID, true).catch(() => {});
+        zg.mutePlayStreamAudio(streamID, true).catch(() => {});
       }
     }
   }
@@ -559,10 +591,11 @@ export class ZegoVoiceService {
    * @param userID 要取消静音的用户 ID
    */
   unmuteRemoteAudioByUserID(userID: string): void {
-    if (!this._zg) return;
+    const zg = this._ensureEngine();
+    if (!zg) return;
     for (const [streamID, mappedUserID] of this._streamUserMap.entries()) {
       if (mappedUserID === userID) {
-        this._zg.mutePlayStreamAudio(streamID, false).catch(() => {});
+        zg.mutePlayStreamAudio(streamID, false).catch(() => {});
       }
     }
   }
@@ -573,11 +606,12 @@ export class ZegoVoiceService {
    * @param allowedUserIDs 允许听到的用户 ID 列表
    */
   setAllowedSpeakers(allowedUserIDs: string[]): void {
-    if (!this._zg) return;
+    const zg = this._ensureEngine();
+    if (!zg) return;
     const allowedSet = new Set(allowedUserIDs);
     for (const [streamID, mappedUserID] of this._streamUserMap.entries()) {
       const shouldHear = allowedSet.has(mappedUserID);
-      this._zg.mutePlayStreamAudio(streamID, !shouldHear).catch(() => {});
+      zg.mutePlayStreamAudio(streamID, !shouldHear).catch(() => {});
     }
   }
 
@@ -585,9 +619,10 @@ export class ZegoVoiceService {
    * 恢复所有远程音频流为正常状态（取消所有静音限制）
    */
   resetRemoteAudio(): void {
-    if (!this._zg) return;
+    const zg = this._ensureEngine();
+    if (!zg) return;
     for (const streamID of this._remoteStreams.keys()) {
-      this._zg.mutePlayStreamAudio(streamID, this._isSpeakerMuted).catch(() => {});
+      zg.mutePlayStreamAudio(streamID, this._isSpeakerMuted).catch(() => {});
     }
   }
 
@@ -600,6 +635,8 @@ export class ZegoVoiceService {
    */
   async destroy(): Promise<void> {
     if (!this._zg) {
+      // Bug 122 修复：即使引擎为 null，也确保 connectionState 重置为 DISCONNECTED
+      this._connectionState = 'DISCONNECTED';
       return;
     }
 
@@ -610,6 +647,8 @@ export class ZegoVoiceService {
     this._zg.destroyEngine();
     this._zg = null;
     this._appID = 0;
+    // Bug 122 修复：销毁后重置 connectionState 为 DISCONNECTED
+    this._connectionState = 'DISCONNECTED';
 
     console.log('[ZegoVoice] 引擎已销毁');
   }

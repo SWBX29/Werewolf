@@ -47,6 +47,10 @@ import type {
   WolfChatMessage,
   WolfChatLog,
 } from '@langrensha/shared';
+import {
+  VALID_ROLE_ID_SET,
+  hasNightAction,
+} from '@langrensha/shared';
 
 // ============================================================================
 // 辅助：Mongoose 子文档 Schema
@@ -88,6 +92,7 @@ const PlayerSubSchema = new Schema<Player>({
   idiotRevealed: { type: Boolean, required: true, default: false },
   hunterGunFired: { type: Boolean, required: true, default: false },
   wolfKingGunFired: { type: Boolean, required: true, default: false },
+  knightHasDueled: { type: Boolean, required: true, default: false },
   hiddenWolfHasActed: { type: Boolean, default: false },
   mechanicalWolfImitateTarget: { type: Number, default: null },
   mechanicalWolfPhase: { type: String, default: null, enum: ['selecting', 'learning', 'active', 'failed', 'silent', null] },
@@ -208,17 +213,29 @@ const RuleConfigSubSchema = new Schema<RuleConfig>({
   nightActionOrder: {
     type: [String],
     required: true,
-    validate: {
-      validator(v: string[]) {
-        // 每个元素必须是合法的 RoleId
-        const validRoles = new Set([
-          'villager', 'seer', 'witch', 'hunter', 'guard', 'idiot', 'knight',
-          'werewolf', 'white_wolf_king', 'wolf_king', 'nightmare_shadow', 'hidden_wolf', 'mechanical_wolf',
-        ]);
-        return v.every((r) => validRoles.has(r));
+    validate: [
+      {
+        validator(v: string[]) {
+          return v.every((r) => VALID_ROLE_ID_SET.has(r));
+        },
+        message: 'nightActionOrder 包含非法角色ID',
       },
-      message: 'nightActionOrder 包含非法角色ID',
-    },
+      {
+        validator(v: string[], this_: any) {
+          const rd = this_.roleDistribution as Map<string, number> | undefined;
+          if (!rd || rd.size === 0) return true;
+          const nightActionRoles: string[] = [];
+          for (const [role, count] of rd.entries()) {
+            if (count > 0 && hasNightAction(role as RoleId)) {
+              nightActionRoles.push(role);
+            }
+          }
+          const orderSet = new Set(v);
+          return nightActionRoles.every((r) => orderSet.has(r));
+        },
+        message: 'nightActionOrder 必须包含 roleDistribution 中所有拥有夜间行动的角色',
+      },
+    ],
   },
   nightActionOrderPreset: {
     type: String,
@@ -281,16 +298,26 @@ const RuleConfigSubSchema = new Schema<RuleConfig>({
     type: [String],
     required: true,
     default: ['werewolf', 'wolf_king', 'nightmare_shadow'],
-    validate: {
-      validator(v: string[]) {
-        const validRoles = new Set([
-          'villager', 'seer', 'witch', 'hunter', 'guard', 'idiot', 'knight',
-          'werewolf', 'white_wolf_king', 'wolf_king', 'nightmare_shadow', 'hidden_wolf', 'mechanical_wolf',
-        ]);
-        return v.every((r) => validRoles.has(r));
+    validate: [
+      {
+        validator(v: string[]) {
+          const validRoles = new Set(VALID_ROLE_ID_SET);
+          return v.every((r) => validRoles.has(r));
+        },
+        message: 'sharedWolfRoles 包含非法角色ID',
       },
-      message: 'sharedWolfRoles 包含非法角色ID',
-    },
+      {
+        validator(v: string[], this_: any) {
+          const rd = this_.roleDistribution as Map<string, number> | undefined;
+          if (!rd || rd.size === 0) return true;
+          return v.every((r) => {
+            const count = rd.get(r);
+            return count !== undefined && count > 0;
+          });
+        },
+        message: 'sharedWolfRoles 中的角色必须在 roleDistribution 中存在且数量大于0',
+      },
+    ],
   },
 
   // ---- 发言顺序 ----
@@ -623,6 +650,88 @@ WolfChatLogSchema.index({ roomCode: 1, timestamp: -1 });
 // ============================================================================
 // 导出 Model
 // ============================================================================
+
+/**
+ * 已知字段白名单，用于创建记录时过滤未知字段
+ * 防止意外写入 Schema 中未定义的字段
+ */
+const GAME_LOG_KNOWN_FIELDS = new Set([
+  'roomCode', 'gameId', 'timestamp', 'actorSeat', 'actorNickname',
+  'actionType', 'targetSeat', 'targetNickname', 'phase', 'round',
+  'detail', 'overridden', 'overrideReason', 'nightActionOrderSnapshot',
+]);
+
+const WOLF_CHAT_LOG_KNOWN_FIELDS = new Set([
+  'roomCode', 'gameId', 'round', 'senderSeat', 'senderNickname',
+  'content', 'timestamp', 'visibility',
+]);
+
+const ROOM_KNOWN_FIELDS = new Set([
+  'roomCode', 'gameMode', 'phase', 'nightSubPhase', 'round', 'config',
+  'players', 'speechOrder', 'currentSpeakerIndex', 'currentSpeechRound',
+  'votes', 'sheriffElectionVotes', 'pkCandidates', 'nightActions',
+  'werewolfTarget', 'witchSaveTarget', 'witchPoisonTarget',
+  'guardProtectTarget', 'nightmareTarget', 'wolfVotes', 'wolfVoteConsensus',
+  'nightDeaths', 'dayDeaths', 'isPaused', 'winner',
+  'createdAt', 'startedAt', 'endedAt', 'configVersion',
+]);
+
+/**
+ * 过滤对象中的未知字段，只保留白名单中的字段
+ * 用于在创建记录前清理输入数据
+ */
+export function filterKnownFields<T extends Record<string, unknown>>(
+  data: T,
+  allowedFields: Set<string>,
+): Partial<T> {
+  const result: Record<string, unknown> = {};
+  for (const key of Object.keys(data)) {
+    if (allowedFields.has(key)) {
+      result[key] = data[key];
+    }
+  }
+  return result as Partial<T>;
+}
+
+/**
+ * 过滤 GameLog 记录中的未知字段
+ */
+export function filterGameLogFields<T extends Record<string, unknown>>(data: T): Partial<T> {
+  return filterKnownFields(data, GAME_LOG_KNOWN_FIELDS);
+}
+
+/**
+ * 过滤 WolfChatLog 记录中的未知字段
+ */
+export function filterWolfChatLogFields<T extends Record<string, unknown>>(data: T): Partial<T> {
+  return filterKnownFields(data, WOLF_CHAT_LOG_KNOWN_FIELDS);
+}
+
+/**
+ * 过滤 Room 记录中的未知字段
+ */
+export function filterRoomFields<T extends Record<string, unknown>>(data: T): Partial<T> {
+  return filterKnownFields(data, ROOM_KNOWN_FIELDS);
+}
+
+/**
+ * 在 MongoDB 事务中执行操作
+ * 需要副本集支持，如果未启用副本集则降级为普通操作
+ */
+export async function withTransaction<T>(
+  fn: (session: mongoose.ClientSession) => Promise<T>,
+): Promise<T> {
+  const session = await mongoose.startSession();
+  try {
+    let result: T;
+    await session.withTransaction(async () => {
+      result = await fn(session);
+    });
+    return result!;
+  } finally {
+    await session.endSession();
+  }
+}
 
 /**
  * 房间 Model — 用于房间状态的 CRUD 操作

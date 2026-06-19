@@ -23,7 +23,7 @@ function PlayerList({ compact = false }: PlayerListProps) {
     ? (judgeState!.players as unknown as PlayerDTO[])
     : playerState!.players;
   const speechOrder = isJudge ? judgeState!.speechOrder : playerState!.speechOrder;
-  const currentSpeakerIndex = isJudge ? judgeState!.currentSpeakerIndex : playerState!.currentSpeakerIndex;
+  const currentSpeakerIndex = (isJudge ? judgeState!.currentSpeakerIndex : playerState!.currentSpeakerIndex) ?? 0;
 
   const phase = isJudge ? judgeState!.phase : playerState!.phase;
 

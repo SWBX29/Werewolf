@@ -137,9 +137,7 @@ export default function NightPhase() {
     }
 
     return () => {
-      // 仅在保持连接（stay）时恢复语音状态
-      // 如果已 leaveVoiceRoom，则不恢复（避免对已退出的房间操作 SDK）
-      if (prevVoiceActionRef.current === 'stay') {
+      if (prevVoiceActionRef.current === 'stay' && useVoiceStore.getState().connectionState === 'CONNECTED') {
         setCanSpeak(true);
         setMicrophoneMuted(false);
         getZegoVoiceService().muteMicrophone(false);

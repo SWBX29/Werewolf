@@ -20,7 +20,7 @@
 | 层级 | 技术 |
 |------|------|
 | 前端 | React 18 + TypeScript + Zustand + Vite |
-| 后端 | Node.js + Koa + WebSocket |
+| 后端 | Node.js + 原生 http 模块 + WebSocket |
 | 数据库 | MongoDB (Mongoose) |
 | 语音 | ZEGO Express WebRTC SDK |
 | 部署 | Monorepo (npm workspaces) |
@@ -38,7 +38,7 @@ langrensha/
 │       └── App.tsx       # 入口组件
 ├── server/          # 后端 Node.js 服务
 │   └── src/
-│       ├── server.ts          # Koa + WebSocket 入口
+│       ├── server.ts          # HTTP + WebSocket 入口
 │       ├── GameEngine.ts      # 游戏状态机引擎
 │       ├── LobbyManager.ts    # 大厅与房间管理
 │       ├── SettlementEngine.ts # 结算引擎
@@ -46,8 +46,8 @@ langrensha/
 │       └── models.ts          # MongoDB 数据模型
 ├── shared/          # 前后端共享类型与常量
 │   ├── types.ts     # 角色、规则、状态、消息类型定义
-│   ├── constants.ts # 房间码字符集等常量
-│   └── utils.ts     # 共享工具函数
+│   └── types/
+│       └── zego.ts  # ZEGO 语音相关类型
 └── package.json     # Monorepo 根配置
 ```
 
@@ -109,7 +109,7 @@ pm2 start dist/server.js --name langrensha-server
                        │ WebSocket (JSON)
                        ▼
 ┌─────────────────────────────────────────────────┐
-│              服务端 (Koa + WebSocket)             │
+│              服务端 (HTTP + WebSocket)              │
 │   LobbyManager → GameEngine → SettlementEngine  │
 │                     ↕ TimerManager               │
 └──────────────────────┬──────────────────────────┘

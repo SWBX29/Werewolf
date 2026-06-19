@@ -27,6 +27,14 @@ export default function WolfChat() {
     setInput('');
   };
 
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      const content = input.trim();
+      if (!content) return;
+      handleSend();
+    }
+  };
+
   return (
     <div className="card border-red-900/50 bg-night-900/80 mt-3">
       <h3 className="text-sm font-semibold text-red-400 mb-2">🐺 狼群密语</h3>
@@ -53,9 +61,7 @@ export default function WolfChat() {
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') handleSend();
-          }}
+          onKeyDown={handleKeyDown}
           placeholder="发送密语..."
           className="input-field flex-1 text-sm py-1"
           maxLength={200}

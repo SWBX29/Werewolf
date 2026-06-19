@@ -95,7 +95,7 @@ const GameView: React.FC = () => {
     if (!enableVoice || !playerState) return;
 
     const phase = playerState.phase;
-    const isNightPhase = ['NIGHT', 'NIGHT_SETTLEMENT', 'PRE_NIGHT'].includes(phase);
+    const isNightPhase = ['NIGHT', 'NIGHT_SETTLEMENT', 'NIGHT_SETTLEMENT_SKILL', 'PRE_NIGHT'].includes(phase);
     const isDayPhase = ['DAY_ANNOUNCE', 'DAY_SPEECH', 'PRE_VOTE_WAIT', 'DAY_VOTE', 'PK_VOTE', 'SHERIFF_ELECTION', 'SHERIFF_TRANSFER', 'DAY_SETTLEMENT', 'DAY_INTERRUPT'].includes(phase);
 
     // 定时器引用（用于 cleanup）
@@ -146,7 +146,7 @@ const GameView: React.FC = () => {
         clearTimeout(hintTimer);
       }
     };
-  }, [playerState?.phase, nightVoiceMode, connectionState, enableVoice]);
+  }, [playerState?.phase, nightVoiceMode, connectionState, enableVoice, joinVoiceRoom, setNightVoiceMode, setVoiceStatusHint]);
 
   // 房间解散 → 显示解散界面（优先级最高）
   if (roomDissolvedData) {
@@ -262,7 +262,7 @@ const GameView: React.FC = () => {
   };
 
   // Bug 21 修复：背景样式根据阶段切换，白天使用明亮的背景
-  const isNight = ['NIGHT', 'NIGHT_SETTLEMENT', 'PRE_NIGHT'].includes(playerState.phase);
+  const isNight = ['NIGHT', 'NIGHT_SETTLEMENT', 'NIGHT_SETTLEMENT_SKILL', 'PRE_NIGHT'].includes(playerState.phase);
   const bgClass = isNight ? 'bg-night-phase' : 'bg-gradient-to-b from-amber-950/50 to-night-950';
 
   return (

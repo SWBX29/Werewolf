@@ -1,6 +1,7 @@
 import type { ClientMessage, ServerMessage } from '@langrensha/shared';
 
-const HEARTBEAT_INTERVAL = 25000;
+const HEARTBEAT_INTERVAL = 30000;
+const HEARTBEAT_TIMEOUT = 10000;
 
 /**
  * Create a new WebSocket connection to the game server
@@ -26,8 +27,16 @@ export function sendMessage(ws: WebSocket | null, message: ClientMessage): void 
  * Returns the interval ID for cleanup
  */
 export function setupHeartbeat(ws: WebSocket): ReturnType<typeof setInterval> {
+  let lastPongTime = Date.now();
+
   return setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) {
+      // Bug 164 修复：检查上次 PONG 是否超时
+      if (Date.now() - lastPongTime > HEARTBEAT_INTERVAL + HEARTBEAT_TIMEOUT) {
+        console.warn('[Simulator] Heartbeat timeout, closing connection');
+        ws.close(4000, 'Heartbeat timeout');
+        return;
+      }
       ws.send(JSON.stringify({ type: 'PING' }));
     }
   }, HEARTBEAT_INTERVAL);

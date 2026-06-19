@@ -85,7 +85,7 @@ function StatusBar() {
       </div>
 
       {/* 倒计时 — 大厅和夜晚阶段不在顶部显示 */}
-      {phase !== 'LOBBY' && phase !== 'NIGHT' && phase !== 'NIGHT_SETTLEMENT' && (
+      {phase !== 'LOBBY' && phase !== 'NIGHT' && phase !== 'NIGHT_SETTLEMENT' && phase !== 'NIGHT_SETTLEMENT_SKILL' && (
         <div className="flex-1 max-w-xs">
           <CountdownTimer seconds={phaseTimeRemaining} />
         </div>

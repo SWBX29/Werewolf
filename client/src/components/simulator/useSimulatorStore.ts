@@ -56,7 +56,7 @@ import {
   parseMessage,
   getSimulatorWsUrl,
 } from './websocket';
-import { injectStateToGameStore, clearInjectedState } from './storeInjector';
+import { injectStateToGameStore, clearInjectedState, updateGameStoreFromMessage } from './storeInjector';
 
 // ============================================================================
 // 心跳定时器追踪
@@ -64,6 +64,9 @@ import { injectStateToGameStore, clearInjectedState } from './storeInjector';
 
 /** 每个连接的心跳 interval ID，用于清理 */
 const heartbeatTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
+
+/** 自动执行定时器追踪 */
+const autoExecuteTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
 
 // ============================================================================
 // Store 状态接口
@@ -283,7 +286,20 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
     };
 
     ws.onerror = () => {
-      set({ error: '法官连接发生错误' });
+      // Bug 113 修复：出错时正确关闭连接
+      closeConnection(ws);
+      clearHeartbeat('__judge__');
+      set((s) => {
+        if (s.judgeConnection?.ws !== ws) return s;
+        return {
+          judgeConnection: s.judgeConnection
+            ? { ...s.judgeConnection, isConnected: false, ws: null }
+            : null,
+          error: '法官连接发生错误',
+        };
+      });
+      // Bug 165 修复：onerror 时触发 onclose 清理逻辑
+      ws.onclose?.(new CloseEvent('close'));
     };
 
     ws.onclose = () => {
@@ -377,7 +393,32 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
     };
 
     ws.onerror = () => {
-      set({ error: `玩家 ${nickname} 连接发生错误` });
+      // Bug 113 修复：出错时正确关闭连接
+      closeConnection(ws);
+      // Bug 143 修复：onerror 时清理心跳并更新连接状态
+      const currentState = get();
+      let playerId: string | null = null;
+      for (const [id, c] of currentState.connections) {
+        if (c.ws === ws) {
+          playerId = id;
+          break;
+        }
+      }
+      if (playerId) {
+        clearHeartbeat(playerId);
+      }
+      set((s) => {
+        const next = new Map(s.connections);
+        if (playerId) {
+          const c = next.get(playerId);
+          if (c) {
+            next.set(playerId, { ...c, isConnected: false, ws: null });
+          }
+        }
+        return { connections: next, error: `玩家 ${nickname} 连接发生错误` };
+      });
+      // Bug 165 修复：onerror 时触发 onclose 清理逻辑
+      ws.onclose?.(new CloseEvent('close'));
     };
 
     ws.onclose = () => {
@@ -392,6 +433,12 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
       }
       if (playerId) {
         clearHeartbeat(playerId);
+        // Bug 170 修复：清理自动执行定时器
+        const timer = autoExecuteTimers.get(playerId);
+        if (timer !== undefined) {
+          clearTimeout(timer);
+          autoExecuteTimers.delete(playerId);
+        }
         set((s) => {
           const next = new Map(s.connections);
           const c = next.get(playerId);
@@ -418,7 +465,14 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
     closeConnection(conn.ws);
     clearHeartbeat(playerId);
 
-    // 从状态中移除
+    // Bug 170 修复：清理自动执行定时器
+    const timer = autoExecuteTimers.get(playerId);
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      autoExecuteTimers.delete(playerId);
+    }
+
+    // 从状态中移除（Bug 166 修复：同时清除 suggestedAction）
     set((s) => {
       const next = new Map(s.connections);
       next.delete(playerId);
@@ -499,18 +553,18 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
   selectPlayer: (playerId: string | null) => {
     set({ selectedPlayerId: playerId });
 
-    // 注入状态到游戏 store
+    // 注入状态到游戏 store（切换玩家时完全重置）
     const state = get();
     if (playerId) {
       const playerState = state.playerStates.get(playerId);
       const conn = state.connections.get(playerId);
       if (playerState && conn) {
-        injectStateToGameStore(playerState, conn);
+        injectStateToGameStore(playerState, conn, true);
       }
     } else {
       // 如果选中法官，注入法官状态
       if (state.judgeState && state.judgeConnection) {
-        injectStateToGameStore(state.judgeState, state.judgeConnection);
+        injectStateToGameStore(state.judgeState, state.judgeConnection, true);
       } else {
         clearInjectedState();
       }
@@ -518,10 +572,15 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
   },
 
   setAutoMode: (mode: AutoMode) => {
-    set((s) => ({
-      autoMode: mode,
-      autoStrategies: { ...s.autoStrategies, mode },
-    }));
+    set((s) => {
+      // Bug 167 修复：深拷贝 autoStrategies 再修改
+      const strategies = JSON.parse(JSON.stringify(s.autoStrategies)) as AutoStrategies;
+      strategies.mode = mode;
+      return {
+        autoMode: mode,
+        autoStrategies: strategies,
+      };
+    });
   },
 
   setAutoStrategy: (roleId: string, strategy: Record<string, unknown>) => {
@@ -657,8 +716,9 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
             } else if (witchStrat.poisonPriority === 'evil_first') {
               poisonTarget = pickRandomEvilSeat(judgeState.players);
             } else if (witchStrat.poisonPriority === 'custom' && witchStrat.customPoisonTargets?.length) {
+              // Bug 115 修复：验证自定义毒药目标是否在可用列表中
               const available = witchStrat.customPoisonTargets.filter(
-                (s) => request.availableTargets.includes(s) && !request.disabledTargets.includes(s),
+                (s) => typeof s === 'number' && request.availableTargets.includes(s) && !request.disabledTargets.includes(s),
               );
               poisonTarget = available.length > 0 ? available[0] : null;
             }
@@ -716,7 +776,8 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
 
       case 'werewolf':
       case 'white_wolf_king':
-      case 'wolf_king': {
+      case 'wolf_king':
+      case 'hidden_wolf': {
         const wolfStrat = strategies.werewolf;
         let targetSeat: number | null = null;
 
@@ -738,10 +799,14 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
               : null;
           }
         } else if (wolfStrat.killStrategy === 'custom' && wolfStrat.customTarget !== undefined) {
-          targetSeat = request.availableTargets.includes(wolfStrat.customTarget) &&
-            !request.disabledTargets.includes(wolfStrat.customTarget)
-            ? wolfStrat.customTarget
-            : null;
+          // Bug 116 修复：防御性检查 customTarget 是否为有效数字
+          const custom = wolfStrat.customTarget;
+          if (typeof custom === 'number' && request.availableTargets.includes(custom) &&
+            !request.disabledTargets.includes(custom)) {
+            targetSeat = custom;
+          } else {
+            targetSeat = null;
+          }
         }
 
         return {
@@ -832,6 +897,10 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
 
     // 清理所有心跳
     clearAllHeartbeats();
+
+    // 清理所有自动执行定时器
+    autoExecuteTimers.forEach((timer) => clearTimeout(timer));
+    autoExecuteTimers.clear();
 
     // 重置状态
     set({
@@ -934,8 +1003,9 @@ function handleJudgeMessage(msg: ServerMessage, ws: WebSocket): void {
     case 'PHASE_CHANGE': {
       store.setState({
         currentPhase: msg.phase,
-        currentRound: msg.round,
-        nightSubPhase: msg.nightSubPhase,
+        // Bug 114 修复：提供默认值防止 undefined
+        currentRound: msg.round ?? 0,
+        nightSubPhase: msg.nightSubPhase ?? null,
         simulatorPhase: deriveSimulatorPhase(msg.phase),
       });
 
@@ -1053,6 +1123,12 @@ function handleJudgeMessage(msg: ServerMessage, ws: WebSocket): void {
       // 其他消息类型忽略（法官不需要处理所有玩家专属消息）
       break;
   }
+
+  // Sync judge messages to useGameStore when in judge view (selectedPlayerId === null)
+  const currentState = store.getState();
+  if (currentState.selectedPlayerId === null) {
+    updateGameStoreFromMessage(msg);
+  }
 }
 
 // ============================================================================
@@ -1079,7 +1155,10 @@ function handlePlayerMessage(playerId: string, msg: ServerMessage, ws: WebSocket
                 ...conn,
                 playerId: actualId,
                 seatNumber: playerState.players.find((p) => p.id === actualId)?.seatNumber ?? null,
-                role: playerState.players.find((p) => p.id === actualId)?.role ?? null,
+                // LOBBY 阶段不更新 role（默认为 villager 无意义）
+                role: playerState.phase !== 'LOBBY'
+                  ? (playerState.players.find((p) => p.id === actualId)?.role ?? null)
+                  : conn.role,
               };
               next.delete(playerId);
               next.set(actualId, updated);
@@ -1108,7 +1187,9 @@ function handlePlayerMessage(playerId: string, msg: ServerMessage, ws: WebSocket
             const nextPlayerStates = new Map(s.playerStates);
             nextPlayerStates.set(playerId, playerState);
 
-            // 同步角色和座位号
+            // 同步座位号和准备状态
+            // 角色信息优先从 judgeState 同步（通过 syncPlayerRolesFromJudge），
+            // PlayerDTO.role 在 LOBBY 阶段为默认值 'villager'，不应覆盖
             const nextConnections = new Map(s.connections);
             const conn = nextConnections.get(playerId);
             const selfPlayer = playerState.players.find((p) => p.id === playerId);
@@ -1116,7 +1197,8 @@ function handlePlayerMessage(playerId: string, msg: ServerMessage, ws: WebSocket
               nextConnections.set(playerId, {
                 ...conn,
                 seatNumber: selfPlayer.seatNumber,
-                role: selfPlayer.role,
+                // LOBBY 阶段不更新 role（默认为 villager 无意义），保留从 judgeState 同步的值
+                role: playerState.phase !== 'LOBBY' ? selfPlayer.role : conn.role,
                 isReady: selfPlayer.isReady,
               });
             }
@@ -1148,8 +1230,8 @@ function handlePlayerMessage(playerId: string, msg: ServerMessage, ws: WebSocket
       const state = store.getState();
       const conn = state.connections.get(playerId);
 
-      // 如果自动模式开启，生成建议
-      if (state.autoMode !== 'off' && conn?.role) {
+      // 如果自动模式开启且不在 LOBBY 阶段，生成建议
+      if (state.autoMode !== 'off' && conn?.role && state.currentPhase !== 'LOBBY') {
         const suggestion = state.generateSuggestion(playerId);
         if (suggestion) {
           store.setState((s) => {
@@ -1161,12 +1243,22 @@ function handlePlayerMessage(playerId: string, msg: ServerMessage, ws: WebSocket
             return { connections: next };
           });
 
-          // 如果是全自动模式，立即执行
+          // 如果是全自动模式，延迟执行
           if (state.autoMode === 'auto') {
+            // Bug 170 修复：清除之前的自动执行定时器
+            if (autoExecuteTimers.has(playerId)) {
+              clearTimeout(autoExecuteTimers.get(playerId));
+            }
             // 延迟一小段时间再执行，模拟思考时间
-            setTimeout(() => {
+            const timer = setTimeout(() => {
+              autoExecuteTimers.delete(playerId);
               const currentState = store.getState();
+              // Bug 112 修复：执行前再次检查自动模式是否仍为 auto 且连接仍然可用
+              if (currentState.autoMode !== 'auto') return;
+              // Bug 169 修复：验证当前阶段是否仍为夜间
+              if (currentState.currentPhase !== 'NIGHT') return;
               const currentConn = currentState.connections.get(playerId);
+              // Bug 142 修复：检查连接是否仍然活跃
               if (currentConn?.suggestedAction && currentConn.ws && currentConn.isConnected) {
                 sendMessage(currentConn.ws, currentConn.suggestedAction);
                 store.setState((s) => {
@@ -1179,6 +1271,7 @@ function handlePlayerMessage(playerId: string, msg: ServerMessage, ws: WebSocket
                 });
               }
             }, 500 + Math.random() * 1000);
+            autoExecuteTimers.set(playerId, timer);
           }
         }
       }
@@ -1272,6 +1365,12 @@ function handlePlayerMessage(playerId: string, msg: ServerMessage, ws: WebSocket
 
     default:
       break;
+  }
+
+  // Sync message to useGameStore if this player is currently selected
+  const currentState = store.getState();
+  if (currentState.selectedPlayerId === playerId) {
+    updateGameStoreFromMessage(msg);
   }
 }
 

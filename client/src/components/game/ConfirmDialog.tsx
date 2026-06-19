@@ -1,4 +1,4 @@
-import React, { ReactNode } from 'react';
+import React, { ReactNode, useEffect, useRef } from 'react';
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -39,6 +39,31 @@ function ConfirmDialog({
   onCancel,
   zIndex = 40,
 }: ConfirmDialogProps) {
+  const mountedRef = useRef(true);
+  const triggeredRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    triggeredRef.current = false;
+  }, [open]);
+
+  const handleConfirm = () => {
+    if (triggeredRef.current) return;
+    triggeredRef.current = true;
+    if (mountedRef.current) onConfirm();
+  };
+
+  const handleCancel = () => {
+    if (triggeredRef.current) return;
+    triggeredRef.current = true;
+    if (mountedRef.current) onCancel();
+  };
+
   if (!open) return null;
 
   const confirmBtnClass = confirmVariant === 'danger' ? 'btn-danger' : 'btn-primary';
@@ -82,13 +107,13 @@ function ConfirmDialog({
         <div className="flex gap-3">
           <button
             className="btn-secondary flex-1"
-            onClick={onCancel}
+            onClick={handleCancel}
           >
             {cancelLabel}
           </button>
           <button
             className={`${confirmBtnClass} flex-1`}
-            onClick={onConfirm}
+            onClick={handleConfirm}
           >
             {confirmLabel}
           </button>

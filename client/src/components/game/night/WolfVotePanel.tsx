@@ -38,7 +38,9 @@ export default function WolfVotePanel() {
   if (!nightActionRequest) return null;
 
   // 统计投票进度
-  const totalWolves = Object.keys(wolfVotes || {}).length || 1;
+  const totalWolves = players.filter(
+    (p) => p.status === 'alive' && nightActionRequest?.wolfAllies?.some((a) => a.seatNumber === p.seatNumber)
+  ).length || nightActionRequest?.wolfAllies?.length || 1;
   const votedCount = Object.values(wolfVotes || {}).filter((v) => v !== undefined).length;
 
   const handleConfirmClick = () => {

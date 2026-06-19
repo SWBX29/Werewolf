@@ -24,6 +24,9 @@ const VotePhase: React.FC = () => {
   const [whiteWolfTarget, setWhiteWolfTarget] = useState<number | null>(null);
   const [showWhiteWolfConfirm, setShowWhiteWolfConfirm] = useState(false);
 
+  // Bug 88 修复：投票防重复提交
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
   // Bug 5 修复：投票阶段全体发言
   const [speechInput, setSpeechInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -79,8 +82,10 @@ const VotePhase: React.FC = () => {
   };
 
   const confirmVote = () => {
-    submitVote(confirmTarget);
+    if (isSubmitting) return;
+    setIsSubmitting(true);
     setActionLocked(true);
+    submitVote(confirmTarget);
     setShowConfirm(false);
   };
 
@@ -109,12 +114,13 @@ const VotePhase: React.FC = () => {
 
   // ---- 投票结果数据计算 ----
   const voteData = useMemo(() => {
-    if (!voteResult) return null;
+    if (!voteResult || !voteResult.votes || typeof voteResult.votes !== 'object') return null;
 
     const { votes, eliminated, isPK: isPKResult, pkCandidates } = voteResult;
 
     // 所有投票条目
     const voteEntries = Object.entries(votes)
+      .filter(([, target]) => target !== undefined)
       .map(([voter, target]) => ({
         voter: Number(voter),
         target: target as number | null,

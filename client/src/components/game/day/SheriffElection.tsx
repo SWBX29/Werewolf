@@ -15,6 +15,7 @@ const SheriffElection: React.FC = () => {
   const [selectedSeat, setSelectedSeat] = useState<number | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
   const [confirmTarget, setConfirmTarget] = useState<number | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Bug 56 修复：候选人需排除法官（防御性编程）
   const candidates = useMemo(
@@ -53,7 +54,8 @@ const SheriffElection: React.FC = () => {
 
   // 确认投票
   const confirmVote = () => {
-    // Bug 49 修复：先锁定状态再提交，防止快速双击重复投票
+    if (isActionLocked || isSubmitting) return;
+    setIsSubmitting(true);
     setActionLocked(true);
     submitSheriffElectionVote(confirmTarget);
     setShowConfirm(false);

@@ -77,14 +77,15 @@ const HunterGun: React.FC = () => {
   };
 
   const handleConfirm = () => {
-    if (selectedSeat === null) return;
+    if (selectedSeat === null || gunFired) return;
     hunterGun(selectedSeat);
     setShowConfirm(false);
     setGunFired(true);
   };
 
   const handleSkipGun = () => {
-    hunterGun(-1); // -1 表示不开枪
+    if (gunFired) return;
+    hunterGun(-1);
     setGunFired(true);
   };
 

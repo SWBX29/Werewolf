@@ -52,10 +52,12 @@ const SpeechPhase: React.FC = () => {
     }
 
     return () => {
-      setCanSpeak(true);
-      getZegoVoiceService().muteMicrophone(false);
+      if (useVoiceStore.getState().connectionState === 'CONNECTED') {
+        setCanSpeak(true);
+        getZegoVoiceService().muteMicrophone(false);
+      }
     };
-  }, [playerState?.speechOrder, playerState?.currentSpeakerIndex, playerState?.myPlayerId, connectionState, playerState?.players, enableVoice]);
+  }, [playerState?.speechOrder, playerState?.currentSpeakerIndex, playerState?.myPlayerId, connectionState, playerState?.players, enableVoice, setCanSpeak]);
 
   // 天亮公告：5秒倒计时全屏覆盖 → 倒计时结束后显示内联摘要
   const [showDawnOverlay, setShowDawnOverlay] = useState(false);
@@ -112,7 +114,7 @@ const SpeechPhase: React.FC = () => {
   // 自动滚动到底部
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [speechMessages]);
+  }, [speechMessages.length]);
 
   const handleSend = () => {
     const trimmed = inputValue.trim();
@@ -124,6 +126,7 @@ const SpeechPhase: React.FC = () => {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
+      if (!inputValue.trim()) return;
       handleSend();
     }
   };
@@ -131,6 +134,7 @@ const SpeechPhase: React.FC = () => {
   const handleLastWordsKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
+      if (!lastWordsInput.trim()) return;
       handleLastWordsSend();
     }
   };

@@ -39,7 +39,7 @@ export default function WitchPanel() {
       // 重连时如果解药未用但步骤是 done，重置为 antidote
       setStep('antidote');
     }
-  }, [antidoteUsed, poisonUsed]);
+  }, [antidoteUsed, poisonUsed, step]);
 
   if (!nightActionRequest) return null;
 

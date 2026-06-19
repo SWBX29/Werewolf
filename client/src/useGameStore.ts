@@ -177,6 +177,8 @@ interface GameState {
   disconnect: () => void;
   manualReconnect: () => void;
   sendMessage: (message: ClientMessage) => void;
+  /** 消息拦截器（模拟器使用），返回 true 表示已拦截，不再走默认发送逻辑 */
+  sendMessageInterceptor: ((message: ClientMessage) => boolean) | null;
   setView: (view: ViewType) => void;
   setError: (error: string | null) => void;
   dismissError: () => void;
@@ -510,6 +512,7 @@ export const useGameStore = create<GameState>((set, get) => ({
 
   ruleConfig: createDefaultRuleConfig(),
   enableVoice: true,
+  sendMessageInterceptor: null,
 
   // ---- HMR 状态恢复 ----
   // 覆盖上面的初始值；方法引用在下方被重新定义，不受影响
@@ -586,6 +589,8 @@ export const useGameStore = create<GameState>((set, get) => ({
         };
 
         ws.onmessage = (event) => {
+          // Bug 93 修复：竞速连接中，只有胜出连接的消息才处理
+          // settleWith 已确保只有胜出连接会设为 get().ws
           if (get().ws !== ws) return;
           _lastPongTime = Date.now();
           try {
@@ -633,11 +638,10 @@ export const useGameStore = create<GameState>((set, get) => ({
   },
 
   disconnect: () => {
-    // 取消重连定时器
+    // Bug 103 修复：取消重连定时器并清除引用
     const timer = get().reconnectTimer;
     if (timer) {
       clearTimeout(timer);
-      set({ reconnectTimer: null });
     }
     // 清理心跳和可见性监听
     _cleanupConnectionResources();
@@ -645,20 +649,19 @@ export const useGameStore = create<GameState>((set, get) => ({
     if (ws) {
       ws.close();
     }
-    set({ ws: null, isConnected: false, isReconnecting: false, reconnectAttempts: 0, playerId: null, wsUrl: null });
+    set({ ws: null, isConnected: false, isReconnecting: false, reconnectAttempts: 0, reconnectTimer: null, playerId: null, wsUrl: null, sendMessageInterceptor: null });
   },
 
   /** 手动触发重连 */
   manualReconnect: () => {
-    // 取消现有重连定时器
+    // Bug 95 修复：清除旧的重连定时器
     const timer = get().reconnectTimer;
     if (timer) {
       clearTimeout(timer);
-      set({ reconnectTimer: null });
     }
     // 关闭旧连接（先置空 ws，这样旧 ws 的 onclose 会被 get().ws !== ws 过滤掉）
     const oldWs = get().ws;
-    set({ ws: null, isConnected: false, isReconnecting: true, reconnectAttempts: 0 });
+    set({ ws: null, isConnected: false, isReconnecting: true, reconnectAttempts: 0, reconnectTimer: null });
     if (oldWs) {
       oldWs.close();
     }
@@ -668,6 +671,12 @@ export const useGameStore = create<GameState>((set, get) => ({
   },
 
   sendMessage: (message: ClientMessage) => {
+    // Check interceptor first (used by simulator)
+    const interceptor = get().sendMessageInterceptor;
+    if (interceptor && interceptor(message)) {
+      return; // Interceptor handled the message
+    }
+
     const ws = get().ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       set({ error: '未连接到服务器' });
@@ -727,47 +736,12 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
-  // Bug 54 说明：leaveRoom 采用乐观更新策略
-  // 立即重置本地状态以提供即时反馈，不等待服务端确认
-  // 这是有意为之的设计选择，因为：
-  // 1. 离开房间是用户主动操作，服务端几乎不会拒绝
-  // 2. 即使网络延迟，用户也能立即看到离开效果
-  // 3. 如果服务端未收到消息，WebSocket 重连后会自动同步状态
+  // Bug 96 修复：leaveRoom 不做乐观更新，仅发送消息，等服务端确认后再清理状态
   leaveRoom: () => {
     // 先退出语音房间（确保语音资源释放）
     useVoiceStore.getState().leaveVoiceRoom();
-    
+
     get().sendMessage({ type: 'LEAVE_ROOM' });
-    set({
-      roomCode: null,
-      inviteLink: null,
-      qrCodeDataUrl: null,
-      playerState: null,
-      judgeState: null,
-      isJudge: false,
-      currentView: 'home',
-      roleConfirmed: false,
-      speechMessages: [],
-      nightActionResult: null,
-      knightDuelResult: null,
-      gameOverData: null,
-      roomDissolvedData: null,
-      dayAnnouncement: null,
-      voteResult: null,
-      phaseTimeRemaining: 0,
-      speechTimeRemaining: 0,
-      isActionLocked: false,
-      spectatorIdentities: null,
-      deadNightsElapsed: 0,
-      appealEvent: null,
-      showArbitration: false,
-      arbitrationEvent: null,
-      deadChatMessages: [],
-      judgeActions: [],
-      preNightHint: null,
-      sheriffTransferRequest: null,
-      sheriffTransferResult: null,
-    });
   },
 
   dissolveRoom: () => {
@@ -988,7 +962,17 @@ export const useGameStore = create<GameState>((set, get) => ({
   // ==========================================================================
 
   updateRuleConfig: (partial: Partial<RuleConfig>) => {
-    set({ ruleConfig: { ...get().ruleConfig, ...partial } });
+    // Bug 104 修复：验证 partial 中的值，过滤掉无效值
+    const validated: Partial<RuleConfig> = {};
+    for (const [key, value] of Object.entries(partial)) {
+      if (value === undefined || value === null) continue;
+      // 对数值类型的字段做范围校验
+      if (key === 'playerCount' && (typeof value !== 'number' || value < 6 || value > 18)) continue;
+      if (key === 'voteTimeout' && (typeof value !== 'number' || value < 5)) continue;
+      if (key === 'speechTimeout' && (typeof value !== 'number' || value < 5)) continue;
+      (validated as any)[key] = value;
+    }
+    set({ ruleConfig: { ...get().ruleConfig, ...validated } });
   },
 
   setNightActionOrderPreset: (preset: RuleConfig['nightActionOrderPreset']) => {
@@ -1108,15 +1092,19 @@ function handleServerMessage(
           roomCode: playerState.roomCode,
           gameMode: playerState.gameMode,
           currentView: 'game',
-          enableVoice: playerState.enableVoice,
+          enableVoice: playerState.enableVoice ?? get().enableVoice,
           deadNightsElapsed,
-          // 阶段或子阶段切换时重置操作锁定
           isActionLocked: phaseChanged || subPhaseChanged ? false : get().isActionLocked,
           preNightHint: playerState.preNightHint ?? null,
-          // 重连时自动确认角色，防止 NightPhase 等组件因 roleConfirmed=false 返回空
           roleConfirmed: autoConfirmRole ? true : get().roleConfirmed,
-          // 保存 playerId（优先使用消息中的 playerId，确保重连后 playerId 正确）
           playerId: playerState.myPlayerId || get().playerId,
+          nightActionResult: get().nightActionResult,
+          knightDuelResult: get().knightDuelResult,
+          voteResult: get().voteResult,
+          dayAnnouncement: get().dayAnnouncement,
+          gameOverData: get().gameOverData,
+          sheriffTransferRequest: get().sheriffTransferRequest,
+          sheriffTransferResult: get().sheriffTransferResult,
         });
       }
       break;
@@ -1129,6 +1117,7 @@ function handleServerMessage(
         PRE_NIGHT: '入夜等待',
         NIGHT: '天黑请闭眼',
         NIGHT_SETTLEMENT: '夜间结算中',
+        NIGHT_SETTLEMENT_SKILL: '死亡技能发动',
         DAY_ANNOUNCE: '天亮了',
         DAY_SPEECH: '发言阶段',
         PRE_VOTE_WAIT: '投票前等待',
@@ -1162,13 +1151,13 @@ function handleServerMessage(
       // 非 LOBBY / ROLE_REVEAL 阶段且玩家已有角色 → 自动确认
       // 注意：不能依赖 playerState.phase === 'ROLE_REVEAL'，因为 ROOM_STATE
       // 可能先于 PHASE_CHANGE 到达，已将 phase 覆盖为新阶段
-      const hasRole = !!get().playerState?.players.find(
+      const myPlayer = get().playerState?.players.find(
         (p) => p.id === get().playerState?.myPlayerId
-      )?.role;
+      );
       if (
         message.phase !== 'ROLE_REVEAL' &&
         message.phase !== 'LOBBY' &&
-        hasRole &&
+        myPlayer?.role &&
         !get().roleConfirmed
       ) {
         updates.roleConfirmed = true;
@@ -1206,6 +1195,8 @@ function handleServerMessage(
     }
 
     case 'VOTE_RESULT': {
+      if (!message.votes || typeof message.votes !== 'object') break;
+      if (message.eliminated !== null && message.eliminated !== undefined && typeof message.eliminated !== 'number') break;
       const eliminated = message.eliminated;
       if (eliminated) {
         set({ phaseAnnouncement: `${eliminated}号玩家被投票出局` });
@@ -1247,10 +1238,12 @@ function handleServerMessage(
     case 'RECONNECT_SUCCESS': {
       console.log(`[WS] 重连成功: playerId=${message.playerId}, roomCode=${message.roomCode}`);
       // 重连成功后，服务端会通过 ROOM_STATE 等消息推送当前游戏状态
-      // 这里只需确保 playerId 和 roomCode 正确
       set({
         playerId: message.playerId,
         roomCode: message.roomCode,
+        isConnected: true,
+        isReconnecting: false,
+        reconnectAttempts: 0,
       });
       break;
     }
@@ -1296,7 +1289,7 @@ function handleServerMessage(
         });
       } else {
         // 操作被服务器拒绝时，解锁操作锁定，防止界面卡死
-        if (message.code === 'NIGHT_ACTION_FAILED' || message.code === 'VOTE_FAILED' || message.code === 'SHERIFF_ELECTION_VOTE_FAILED' || message.code === 'FINISH_SPEECH_FAILED') {
+        if (message.code === 'NIGHT_ACTION_FAILED' || message.code === 'VOTE_FAILED' || message.code === 'SHERIFF_ELECTION_VOTE_FAILED' || message.code === 'FINISH_SPEECH_FAILED' || message.code === 'LEAVE_ROOM_FAILED') {
           set({ error: message.message, isActionLocked: false });
         } else {
           set({ error: message.message });
@@ -1317,7 +1310,9 @@ function handleServerMessage(
     }
 
     case 'JUDGE_ACTION': {
-      const actionId = `ja_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const actionId = typeof crypto !== 'undefined' && crypto.randomUUID
+        ? crypto.randomUUID()
+        : `ja_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
       set({
         judgeActions: [...get().judgeActions, {
           id: actionId,
@@ -1363,29 +1358,30 @@ function handleServerMessage(
     }
 
     case 'WOLF_CHAT_HISTORY': {
-      // 狼人聊天消息 — 存储到 playerState 或 judgeState 中
+      const validMessages = message.messages.filter((msg) =>
+        msg && typeof msg.id === 'string' && typeof msg.senderSeat === 'number' && typeof msg.content === 'string'
+      );
+      if (validMessages.length === 0) break;
       const currentState = get().playerState;
       const currentJudgeState = get().judgeState;
       
       if (get().isJudge && currentJudgeState) {
-        // 法官视角：追加到 judgeState.wolfChatMessages
         set({
           judgeState: {
             ...currentJudgeState,
             wolfChatMessages: [
               ...(currentJudgeState.wolfChatMessages || []),
-              ...message.messages,
+              ...validMessages,
             ],
           },
         });
       } else if (currentState) {
-        // 玩家视角：追加到 playerState.wolfChatMessages
         set({
           playerState: {
             ...currentState,
             wolfChatMessages: [
               ...(currentState.wolfChatMessages || []),
-              ...message.messages,
+              ...validMessages,
             ],
           },
         });
@@ -1425,6 +1421,9 @@ function handleServerMessage(
     }
 
     case 'DEAD_CHAT': {
+      // Bug 101 修复：按 id 去重，避免重复消息
+      const existingIds = new Set(get().deadChatMessages.map((m) => m.id));
+      if (existingIds.has(message.id)) break;
       set({ deadChatMessages: [...get().deadChatMessages, { id: message.id, senderSeat: message.senderSeat, senderNickname: message.senderNickname, content: message.content, timestamp: message.timestamp }] });
       break;
     }
@@ -1543,6 +1542,14 @@ function handleServerMessage(
           isTimeout: message.isTimeout,
         },
       });
+      break;
+    }
+
+    case 'ADMIN_CLEANUP_RESULT': {
+      // 管理员清理结果 — 更新日志
+      if (get().isJudge || get().adminAuthSuccess) {
+        set({ phaseAnnouncement: '管理员清理操作已完成' });
+      }
       break;
     }
   }

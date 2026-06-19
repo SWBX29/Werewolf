@@ -241,6 +241,12 @@
   }
 }
 
+/* 模拟器游戏面板容器：创建新包含块，使 fixed 定位相对于此容器而非视口 */
+.game-panel-container {
+  transform: translateZ(0);
+  contain: layout;
+}
+
 /* 身份揭示卡片翻转（纯CSS，不可放入 @layer） */
 .reveal-card {
   perspective: 1000px;

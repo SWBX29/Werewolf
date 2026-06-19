@@ -24,6 +24,7 @@ import type {
   Player,
   RuleConfig,
   GameMode,
+  GamePhase,
   PlayerStatus,
   RoleId,
   WolfChatMessage,
@@ -36,6 +37,8 @@ import {
   ROOM_CODE_LENGTH,
   createDefaultRuleConfig,
   isEvilRole,
+  hasNightAction,
+  VALID_ROLE_ID_SET,
 } from '@langrensha/shared';
 import { GameEngine, VoteResultCallback, GameOverCallback, IdentityRevealCallback } from './GameEngine.js';
 import { WolfChatLogModel, isMongoConnected } from './models.js';
@@ -112,6 +115,12 @@ export class LobbyManager {
 
   /** WebSocket → playerId 映射（用于快速查找） */
   private wsToPlayerId: Map<any, string> = new Map();
+
+  /** 快照恢复时间戳（用于在恢复后给予客户端重连的宽限期） */
+  private snapshotRestoredAt: number | null = null;
+
+  /** 快照恢复后的宽限期（毫秒），在此期间不清理 LOBBY 断连玩家 */
+  private static readonly SNAPSHOT_RESTORE_GRACE_PERIOD = 30 * 1000; // 30 秒
 
   /** 房间→客户端反向索引：key 为 roomCode，value 为该房间的 playerId 集合 */
   private roomClientsIndex: Map<string, Set<string>> = new Map();
@@ -228,17 +237,29 @@ export class LobbyManager {
       clearTimeout(context.gracePeriodTimer);
     }
 
-    // 在房间中：设置宽限期（60秒），超时后真正移除
+    // 在房间中：设置宽限期，超时后根据游戏阶段决定处理方式
     const roomCode = context.roomCode;
     context.gracePeriodTimer = setTimeout(() => {
       const ctx = this.clients.get(playerId);
-      // 如果宽限期结束时仍未重连，执行离开逻辑
+      // 如果宽限期结束时仍未重连
       if (ctx && ctx.disconnected && ctx.roomCode === roomCode) {
-        console.log(`[Lobby] 玩家 ${playerId} 重连超时，执行离开房间 ${roomCode}`);
         ctx.gracePeriodTimer = null;
-        this.leaveRoom(playerId);
-        this.removeFromRoomIndex(ctx.roomCode, playerId);
-        this.clients.delete(playerId);
+
+        // 检查游戏阶段
+        const engine = this.rooms.get(roomCode);
+        const phase = engine?.getState().phase;
+
+        if (phase === 'LOBBY') {
+          // LOBBY 阶段：真正移除玩家
+          console.log(`[Lobby] 玩家 ${playerId} 重连超时，执行离开房间 ${roomCode}`);
+          this.leaveRoom(playerId);
+          this.removeFromRoomIndex(ctx.roomCode, playerId);
+          this.clients.delete(playerId);
+        } else {
+          // 游戏进行中/已结束：保留 context 和玩家数据，允许后续通过昵称重连
+          // 玩家仍留在游戏中，只是标记为断连状态
+          console.log(`[Lobby] 玩家 ${playerId} 重连超时（游戏进行中），保留断连状态等待昵称重连`);
+        }
       }
     }, 60 * 1000); // 60秒宽限期
 
@@ -370,6 +391,11 @@ export class LobbyManager {
       return { success: false, error: configValidation.error };
     }
 
+    // 校验玩家数量合理性
+    if (config.playerCount < 6 || config.playerCount > 18) {
+      return { success: false, error: '玩家数量必须在6-18之间' };
+    }
+
     // 生成唯一房间码
     const roomCode = this.generateUniqueRoomCode();
 
@@ -402,6 +428,7 @@ export class LobbyManager {
       wolfChatMessages: [],
       nightDeaths: [],
       dayDeaths: [],
+      pendingDeathSkills: [],
       isPaused: false,
       winner: null,
       createdAt: Date.now(),
@@ -475,6 +502,7 @@ export class LobbyManager {
       idiotRevealed: false,
       hunterGunFired: false,
       wolfKingGunFired: false,
+      knightHasDueled: false,
       deathCause: null,
       deathRound: null,
     };
@@ -616,7 +644,7 @@ export class LobbyManager {
       id: contextPlayerId,
       nickname: nickname.trim(),
       seatNumber,
-      role: 'villager', // 默认值，游戏开始时随机分配
+      role: 'villager', // 占位值，游戏开始时随机分配实际角色
       status: 'alive',
       isJudge: false,
       isSheriff: false,
@@ -637,6 +665,7 @@ export class LobbyManager {
       idiotRevealed: false,
       hunterGunFired: false,
       wolfKingGunFired: false,
+      knightHasDueled: false,
       deathCause: null,
       deathRound: null,
     };
@@ -666,6 +695,117 @@ export class LobbyManager {
       playerId: contextPlayerId,
       seatNumber,
     };
+  }
+
+  /**
+   * 通过昵称+房间号重新加入游戏
+   *
+   * 场景：玩家异常退出（浏览器崩溃、误关页面等）后，重新输入相同昵称和房间号
+   * 如果房间中存在同昵称的断连玩家，则自动重连恢复
+   *
+   * 返回值：
+   * - success: 是否成功
+   * - reconnected: 是否为重连（true）还是新加入（false）
+   * - playerId: 玩家 ID
+   * - roomCode: 房间码
+   * - phase: 当前游戏阶段
+   * - newPlayerId: 需要清理的临时 context 的 playerId
+   */
+  rejoinByNickname(
+    nickname: string,
+    roomCode: string,
+    playerWs: any,
+  ): { success: boolean; error?: string; reconnected?: boolean; playerId?: string; roomCode?: string; phase?: GamePhase; newPlayerId?: string } {
+    // 校验昵称
+    if (!nickname || nickname.trim().length === 0) {
+      return { success: false, error: '昵称不能为空' };
+    }
+    if (nickname.length > 20) {
+      return { success: false, error: '昵称不能超过20个字符' };
+    }
+
+    // 校验房间码格式
+    const upperCode = roomCode.toUpperCase();
+    if (upperCode.length !== ROOM_CODE_LENGTH || !upperCode.split('').every((c) => ROOM_CODE_CHARSET.includes(c))) {
+      return { success: false, error: '房间码格式不正确' };
+    }
+
+    // 查找房间
+    const engine = this.rooms.get(upperCode);
+    if (!engine) {
+      return { success: false, error: '房间不存在' };
+    }
+
+    const state = engine.getState() as RoomState;
+    const trimmedNickname = nickname.trim();
+
+    // 查找同昵称的断连玩家（大小写不敏感匹配，包含法官）
+    const matchingPlayer = state.players.find(
+      (p) => p.nickname.toLowerCase() === trimmedNickname.toLowerCase(),
+    );
+
+    if (matchingPlayer) {
+      // 找到同昵称玩家，检查是否断连
+      const context = this.clients.get(matchingPlayer.id);
+
+      if (context) {
+        // 如果旧连接仍标记为"已连接"，说明服务端未检测到断连（TCP 半开连接）
+        // 此时强制标记为断连，允许昵称重连替换旧连接
+        if (!context.disconnected) {
+          console.log(`[Lobby] 玩家 ${matchingPlayer.id} 旧连接仍标记为已连接，强制替换为新连接（昵称重连）`);
+          // 清理旧 ws 映射
+          if (context.ws) {
+            this.wsToPlayerId.delete(context.ws);
+            // 尝试关闭旧 WebSocket（可能已经死亡但服务端未检测到）
+            try { (context.ws as any).close(); } catch {}
+          }
+          context.disconnected = true;
+          context.disconnectedAt = Date.now();
+        }
+
+        // 断连玩家 → 执行重连
+        // 先获取新 ws 对应的新 playerId（registerConnection 创建的）
+        const newPlayerId = this.wsToPlayerId.get(playerWs);
+        const actualNewPlayerId = (newPlayerId && newPlayerId !== matchingPlayer.id) ? newPlayerId : undefined;
+
+        // 恢复旧 context 的连接
+        context.disconnected = false;
+        context.disconnectedAt = null;
+        context.ws = playerWs;
+
+        // 清除宽限期定时器
+        if (context.gracePeriodTimer) {
+          clearTimeout(context.gracePeriodTimer);
+          context.gracePeriodTimer = null;
+        }
+
+        // 更新 ws 映射
+        this.wsToPlayerId.set(playerWs, matchingPlayer.id);
+
+        console.log(`[Lobby] 玩家 ${matchingPlayer.id} (${trimmedNickname}) 通过昵称重连成功，房间 ${upperCode}${actualNewPlayerId ? `，需清理临时 context ${actualNewPlayerId}` : ''}`);
+
+        return {
+          success: true,
+          reconnected: true,
+          playerId: matchingPlayer.id,
+          roomCode: upperCode,
+          phase: state.phase,
+          newPlayerId: actualNewPlayerId,
+        };
+      }
+
+      // context 不存在但玩家数据仍在游戏中（异常状态）→ 不允许加入
+      return { success: false, error: '该昵称的玩家当前在线，无法重复加入' };
+    }
+
+    // 没有找到同昵称玩家
+    if (state.phase === 'LOBBY') {
+      // LOBBY 阶段 → 正常加入（由 joinRoom 处理）
+      return { success: true, reconnected: false };
+    }
+
+    // 游戏进行中/已结束且没有同昵称断连玩家 → 不允许加入
+    return { success: false, error: '游戏已开始，无法以新身份加入' };
   }
 
   /**
@@ -765,6 +905,9 @@ export class LobbyManager {
 
   /**
    * 法官解散房间 — 销毁房间，返回所有玩家信息供广播
+   *
+   * 注意：调用方需负责向所有房间内客户端（包括法官）广播 ROOM_DISSOLVED 消息。
+   * 断连客户端的 ws 为 null，无法即时通知，重连时需处理房间不存在的情况。
    */
   dissolveRoom(playerId: string): { success: boolean; error?: string; roomCode?: string; players?: Array<{ seatNumber: number; nickname: string; role: RoleId | null; status: PlayerStatus | null }> } {
     const context = this.clients.get(playerId);
@@ -808,6 +951,9 @@ export class LobbyManager {
       }
       this.roomClientsIndex.delete(roomCode);
     }
+
+    // 通知所有玩家房间已解散
+    this.onRoomDissolvedCallback?.(roomCode, players);
 
     return { success: true, roomCode, players };
   }
@@ -859,6 +1005,57 @@ export class LobbyManager {
     return { success: true };
   }
 
+  /**
+   * 校验房间是否满足开始游戏条件
+   * 在 START_GAME 之前调用，提供额外的验证层
+   */
+  canStartGame(roomCode: string): { canStart: boolean; error?: string } {
+    const engine = this.rooms.get(roomCode);
+    if (!engine) {
+      return { canStart: false, error: '房间不存在' };
+    }
+
+    const state = engine.getState() as RoomState;
+
+    if (state.phase !== 'LOBBY') {
+      return { canStart: false, error: '游戏已开始' };
+    }
+
+    const nonJudgePlayers = state.players.filter((p) => !p.isJudge);
+
+    // 校验玩家数量与配置一致
+    if (nonJudgePlayers.length !== state.config.playerCount) {
+      return { canStart: false, error: `当前玩家数(${nonJudgePlayers.length})与配置人数(${state.config.playerCount})不匹配` };
+    }
+
+    // 校验所有玩家已准备
+    const notReady = nonJudgePlayers.filter((p) => !p.isReady);
+    if (notReady.length > 0) {
+      return { canStart: false, error: `${notReady.map((p) => `${p.seatNumber}号 ${p.nickname}`).join('、')} 尚未准备` };
+    }
+
+    // 校验角色分配总数
+    let totalRoles = 0;
+    for (const count of Object.values(state.config.roleDistribution)) {
+      totalRoles += count || 0;
+    }
+    if (totalRoles !== nonJudgePlayers.length) {
+      return { canStart: false, error: `角色分配总数(${totalRoles})与玩家数(${nonJudgePlayers.length})不匹配` };
+    }
+
+    // 校验 sharedWolfRoles 中的角色在 roleDistribution 中存在且数量大于0
+    if (state.config.sharedWolfRoles && state.config.sharedWolfRoles.length > 0) {
+      for (const role of state.config.sharedWolfRoles) {
+        const count = state.config.roleDistribution[role as RoleId];
+        if (!count || count <= 0) {
+          return { canStart: false, error: `sharedWolfRoles 中的角色 ${role} 在角色分配中不存在或数量为0` };
+        }
+      }
+    }
+
+    return { canStart: true };
+  }
+
   // ==========================================================================
   // 房间查询
   // ==========================================================================
@@ -906,6 +1103,10 @@ export class LobbyManager {
   checkLobbyDisconnectedPlayers(): Array<{ roomCode: string; playerId: string; seatNumber: number; nickname: string }> {
     const removed: Array<{ roomCode: string; playerId: string; seatNumber: number; nickname: string }> = [];
 
+    // 快照恢复后的宽限期内，不清理 LOBBY 断连玩家，给客户端重连的机会
+    const inSnapshotGracePeriod = this.snapshotRestoredAt !== null &&
+      Date.now() - this.snapshotRestoredAt < LobbyManager.SNAPSHOT_RESTORE_GRACE_PERIOD;
+
     for (const [roomCode, engine] of this.rooms) {
       const state = engine.getState() as RoomState;
       // 仅处理 LOBBY 阶段的房间
@@ -917,6 +1118,8 @@ export class LobbyManager {
         if (player.isJudge) continue;
         const context = this.clients.get(player.id);
         if (context && context.disconnected) {
+          // 快照恢复宽限期内跳过，给客户端重连时间
+          if (inSnapshotGracePeriod) continue;
           disconnectedPlayers.push(player);
         }
       }
@@ -992,6 +1195,29 @@ export class LobbyManager {
       return { valid: false, error: '夜间行动顺序不能为空' };
     }
 
+    // 校验 sharedWolfRoles 中的角色在 roleDistribution 中存在
+    if (config.sharedWolfRoles && config.sharedWolfRoles.length > 0) {
+      const rdKeys = new Set(Object.keys(config.roleDistribution));
+      for (const role of config.sharedWolfRoles) {
+        if (!VALID_ROLE_ID_SET.has(role)) {
+          return { valid: false, error: `sharedWolfRoles 包含非法角色ID: ${role}` };
+        }
+        if (!rdKeys.has(role) || !config.roleDistribution[role as RoleId]) {
+          return { valid: false, error: `sharedWolfRoles 中的角色 ${role} 在 roleDistribution 中不存在或数量为0` };
+        }
+      }
+    }
+
+    // 校验 nightActionOrder 包含所有拥有夜间行动的角色
+    if (config.nightActionOrder && config.roleDistribution) {
+      const orderSet = new Set(config.nightActionOrder);
+      for (const [role, count] of Object.entries(config.roleDistribution)) {
+        if (count && count > 0 && hasNightAction(role as RoleId) && !orderSet.has(role as RoleId)) {
+          return { valid: false, error: `nightActionOrder 缺少拥有夜间行动的角色: ${role}` };
+        }
+      }
+    }
+
     return { valid: true };
   }
 
@@ -1037,6 +1263,7 @@ export class LobbyManager {
   private voteResultCallback: VoteResultCallback = () => {};
   private gameOverCallback: GameOverCallback = () => {};
   private identityRevealCallback: IdentityRevealCallback = () => {};
+  private onRoomDissolvedCallback: ((roomCode: string, players: Array<{ seatNumber: number; nickname: string; role: RoleId | null; status: PlayerStatus | null }>) => void) | null = null;
 
   /**
    * 设置日志回调
@@ -1118,6 +1345,7 @@ export class LobbyManager {
   setVoteResultCallback(cb: VoteResultCallback): void { this.voteResultCallback = cb; }
   setGameOverCallback(cb: GameOverCallback): void { this.gameOverCallback = cb; }
   setIdentityRevealCallback(cb: IdentityRevealCallback): void { this.identityRevealCallback = cb; }
+  setRoomDissolvedCallback(cb: (roomCode: string, players: Array<{ seatNumber: number; nickname: string; role: RoleId | null; status: PlayerStatus | null }>) => void): void { this.onRoomDissolvedCallback = cb; }
 
   // ---- 转发方法 ----
 
@@ -1197,5 +1425,131 @@ export class LobbyManager {
     this.clients.clear();
     this.wsToPlayerId.clear();
     this.roomClientsIndex.clear();
+  }
+
+  // ==========================================================================
+  // 状态快照（用于 tsx watch 热重载后恢复游戏状态）
+  // ==========================================================================
+
+  /**
+   * 导出所有房间的状态快照
+   * 包含房间状态和玩家连接信息（不含 WebSocket 引用和定时器）
+   */
+  exportSnapshot(): {
+    rooms: Array<{ roomCode: string; state: RoomState; gameId: string }>;
+    clients: Array<{
+      playerId: string;
+      nickname: string;
+      roomCode: string | null;
+      isJudge: boolean;
+      connectedAt: number;
+      disconnected: boolean;
+      disconnectedAt: number | null;
+      origin: string;
+    }>;
+    roomClientsIndex: Record<string, string[]>;
+    playerIdCounter: number;
+  } {
+    const rooms: Array<{ roomCode: string; state: RoomState; gameId: string }> = [];
+    for (const [roomCode, engine] of this.rooms) {
+      rooms.push({
+        roomCode,
+        state: { ...engine.getState() },
+        gameId: engine.gameId,
+      });
+    }
+
+    const clients: Array<{
+      playerId: string;
+      nickname: string;
+      roomCode: string | null;
+      isJudge: boolean;
+      connectedAt: number;
+      disconnected: boolean;
+      disconnectedAt: number | null;
+      origin: string;
+    }> = [];
+    for (const [playerId, ctx] of this.clients) {
+      clients.push({
+        playerId: ctx.playerId,
+        nickname: ctx.nickname,
+        roomCode: ctx.roomCode,
+        isJudge: ctx.isJudge,
+        connectedAt: ctx.connectedAt,
+        disconnected: true, // 恢复后所有连接都标记为断连，等待客户端重连
+        disconnectedAt: Date.now(),
+        origin: ctx.origin,
+      });
+    }
+
+    const roomClientsIndexSnap: Record<string, string[]> = {};
+    for (const [roomCode, playerIds] of this.roomClientsIndex) {
+      roomClientsIndexSnap[roomCode] = Array.from(playerIds);
+    }
+
+    return {
+      rooms,
+      clients,
+      roomClientsIndex: roomClientsIndexSnap,
+      playerIdCounter: this.playerIdCounter,
+    };
+  }
+
+  /**
+   * 从快照恢复所有房间和客户端状态
+   * 恢复后所有客户端标记为 disconnected，等待客户端重连
+   */
+  restoreFromSnapshot(snapshot: ReturnType<typeof this.exportSnapshot>): void {
+    // 恢复房间
+    for (const roomData of snapshot.rooms) {
+      const engine = new GameEngine(
+        roomData.state,
+        (log) => { this.onLog(log); },
+        (type, msg, data) => { this.onJudgeWarning(roomData.roomCode, type, msg, data); },
+        (phase, subPhase, round) => { this.onPhaseChange(roomData.roomCode, phase, subPhase, round); },
+        (rc, message) => { this.onWolfChat(rc, message); },
+        (rc, roleId, round, actorSeats, timeout) => { this.onPhaseReminder(rc, roleId, round, actorSeats, timeout); },
+        (rc, votes, consensus, lockedTarget) => { this.onWolfVoteUpdate(rc, votes, consensus, lockedTarget); },
+        (rc, eventType, data) => { this.onGameEvent(rc, eventType, data); },
+        (rc) => { this.onNightSubPhaseAdvance(rc); },
+        (rc, roleId, remaining) => { this.onNightCountdown(rc, roleId, remaining); },
+        (rc, seatNumber, remaining) => { this.onSpeechCountdown(rc, seatNumber, remaining); },
+        (rc, deaths, mutedSeats) => { this.onDayAnnounce(rc, deaths, mutedSeats); },
+        (rc, votes, eliminated, isPK, pkCandidates) => { this.voteResultCallback(rc, votes, eliminated, isPK, pkCandidates); },
+        (rc, winner, round, players) => { this.gameOverCallback(rc, winner, round, players); },
+        (rc, seatNumber, nickname, revealType, revealInfo) => { this.identityRevealCallback(rc, seatNumber, nickname, revealType, revealInfo); },
+      );
+      engine.gameId = roomData.gameId;
+      this.rooms.set(roomData.roomCode, engine);
+    }
+
+    // 恢复客户端（全部标记为 disconnected，ws 为 null）
+    for (const clientData of snapshot.clients) {
+      this.clients.set(clientData.playerId, {
+        ws: null,
+        playerId: clientData.playerId,
+        nickname: clientData.nickname,
+        roomCode: clientData.roomCode,
+        isJudge: clientData.isJudge,
+        connectedAt: clientData.connectedAt,
+        disconnected: true,
+        disconnectedAt: clientData.disconnectedAt,
+        gracePeriodTimer: null,
+        origin: clientData.origin,
+      });
+    }
+
+    // 恢复房间→客户端索引
+    for (const [roomCode, playerIds] of Object.entries(snapshot.roomClientsIndex)) {
+      this.roomClientsIndex.set(roomCode, new Set(playerIds));
+    }
+
+    // 恢复玩家 ID 计数器
+    this.playerIdCounter = snapshot.playerIdCounter;
+
+    // 记录快照恢复时间，用于 LOBBY 断连检查的宽限期
+    this.snapshotRestoredAt = Date.now();
+
+    console.log(`[Lobby] 从快照恢复: ${this.rooms.size} 个房间, ${this.clients.size} 个客户端（全部等待重连，${LobbyManager.SNAPSHOT_RESTORE_GRACE_PERIOD / 1000}秒宽限期）`);
   }
 }

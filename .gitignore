@@ -10,3 +10,4 @@ server/cpu.json
 *.cpuprofile
 manager/build/
 .trae/
+.game-snapshot.json

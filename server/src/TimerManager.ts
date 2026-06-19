@@ -47,27 +47,47 @@ export class TimerManager {
   private tickTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
   private deadlines: Map<string, number> = new Map();
   private callbacks: Map<string, () => void> = new Map();
+  private onTickCallbacks: Map<string, (remaining: number) => void> = new Map();
+  /** 状态锁：防止 reset/pause 期间的竞态条件 */
+  private resetting: Set<string> = new Set();
+  /** 暂停时保存的剩余时间 */
+  private pausedRemaining: Map<string, number> = new Map();
+  /** 暂停时保存的 onTick 回调 */
+  private pausedOnTick: Map<string, (remaining: number) => void> = new Map();
+  /** 操作锁：防止并发 pause/resume 操作 */
+  private operationLocks: Set<string> = new Set();
 
   /**
    * 设置定时器
    */
   setTimer(config: TimerConfig): void {
-    // 清除已存在的同名定时器
+    if (!config.name || typeof config.name !== 'string') {
+      throw new Error('定时器名称不能为空');
+    }
+    if (typeof config.duration !== 'number' || config.duration <= 0) {
+      throw new Error(`定时器 "${config.name}" 的 duration 必须为正数，收到: ${config.duration}`);
+    }
+    if (typeof config.onTimeout !== 'function') {
+      throw new Error(`定时器 "${config.name}" 的 onTimeout 必须为函数`);
+    }
+
     this.clearTimer(config.name);
 
     const now = Date.now();
-    const deadline = now + config.duration * 1000;
+    const durationMs = config.duration * 1000;
+    const deadline = now + durationMs;
 
     this.deadlines.set(config.name, deadline);
     this.callbacks.set(config.name, config.onTimeout);
+    if (config.onTick) {
+      this.onTickCallbacks.set(config.name, config.onTick);
+    }
 
-    // 设置超时定时器
     const timer = setTimeout(() => {
       this.executeTimeout(config.name);
-    }, config.duration * 1000);
+    }, durationMs);
     this.timers.set(config.name, timer);
 
-    // 设置每秒回调（如果有）
     if (config.onTick) {
       let remaining = config.duration;
       const tickTimer = setInterval(() => {
@@ -78,12 +98,17 @@ export class TimerManager {
       }, 1000);
       this.tickTimers.set(config.name, tickTimer);
     }
+
+    this.pausedRemaining.delete(config.name);
+    this.pausedOnTick.delete(config.name);
   }
 
   /**
    * 清除定时器
    */
   clearTimer(name: string): void {
+    this.resetting.add(name);
+
     const timer = this.timers.get(name);
     if (timer) {
       clearTimeout(timer);
@@ -98,6 +123,9 @@ export class TimerManager {
 
     this.deadlines.delete(name);
     this.callbacks.delete(name);
+    this.onTickCallbacks.delete(name);
+
+    this.resetting.delete(name);
   }
 
   /**
@@ -141,25 +169,56 @@ export class TimerManager {
   }
 
   /**
-   * 暂停定时器（返回剩余时间）
+   * 暂停定时器（返回剩余时间，并同步保存回调以便恢复）
    */
   pauseTimer(name: string): number | null {
-    const remaining = this.getRemainingTime(name);
-    if (remaining === null) return null;
+    if (this.resetting.has(name) || this.operationLocks.has(name)) return null;
 
-    this.clearTimer(name);
-    return remaining;
+    this.operationLocks.add(name);
+    try {
+      const remaining = this.getRemainingTime(name);
+      if (remaining === null) return null;
+
+      const savedCallback = this.callbacks.get(name);
+      const savedOnTick = this.onTickCallbacks.get(name);
+
+      this.clearTimer(name);
+
+      if (savedCallback) {
+        this.callbacks.set(name, savedCallback);
+      }
+      if (savedOnTick) {
+        this.pausedOnTick.set(name, savedOnTick);
+      }
+      this.pausedRemaining.set(name, remaining);
+      this.deadlines.set(name, Date.now() + remaining * 1000);
+
+      return remaining;
+    } finally {
+      this.operationLocks.delete(name);
+    }
   }
 
   /**
    * 恢复定时器
    */
-  resumeTimer(name: string, remaining: number, onTimeout: () => void, onTick?: (remaining: number) => void): void {
+  resumeTimer(name: string, remaining?: number, onTimeout?: () => void, onTick?: (remaining: number) => void): void {
+    if (this.resetting.has(name) || this.operationLocks.has(name)) return;
+
+    const savedRemaining = remaining ?? this.pausedRemaining.get(name);
+    const savedOnTimeout = onTimeout ?? this.callbacks.get(name);
+    const savedOnTick = onTick ?? this.pausedOnTick.get(name);
+
+    if (savedRemaining === undefined || !savedOnTimeout) return;
+
+    this.pausedRemaining.delete(name);
+    this.pausedOnTick.delete(name);
+
     this.setTimer({
       name,
-      duration: remaining,
-      onTimeout,
-      onTick,
+      duration: savedRemaining,
+      onTimeout: savedOnTimeout,
+      onTick: savedOnTick,
     });
   }
 

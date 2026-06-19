@@ -180,7 +180,9 @@ function SmallInput({
 function parseNumbers(text: string): number[] {
   return text
     .split(/[,，\s]+/)
-    .map((s) => parseInt(s.trim(), 10))
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .map((s) => parseInt(s, 10))
     .filter((n) => !isNaN(n) && n > 0);
 }
 
@@ -265,7 +267,12 @@ export default function AutoStrategyPanel() {
   const handleCustomBlur = useCallback(
     (key: string, roleId: string, field: string, text: string) => {
       const nums = parseNumbers(text);
-      updateStrategy(roleId, { [field]: nums.length > 0 ? nums : undefined });
+      // Bug 117 修复：输入为空或无效时删除 customInputs 中的 key
+      if (nums.length > 0) {
+        updateStrategy(roleId, { [field]: nums });
+      } else {
+        updateStrategy(roleId, { [field]: undefined });
+      }
       setCustomInputs((prev) => {
         const next = { ...prev };
         delete next[key];
@@ -463,7 +470,7 @@ export default function AutoStrategyPanel() {
                     const nums = parseNumbers(
                       getCustomInput('werewolf_custom', autoStrategies.werewolf.customTarget ? [autoStrategies.werewolf.customTarget] : undefined),
                     );
-                    updateStrategy('werewolf', { customTarget: nums[0] });
+                    updateStrategy('werewolf', { customTarget: nums.length > 0 ? nums[0] : undefined });
                     setCustomInputs((prev) => {
                       const next = { ...prev };
                       delete next['werewolf_custom'];
@@ -532,7 +539,7 @@ export default function AutoStrategyPanel() {
                     const nums = parseNumbers(
                       getCustomInput('mewolf_custom', autoStrategies.mechanicalWolf.customTarget ? [autoStrategies.mechanicalWolf.customTarget] : undefined),
                     );
-                    updateStrategy('mechanicalWolf', { customTarget: nums[0] });
+                    updateStrategy('mechanicalWolf', { customTarget: nums.length > 0 ? nums[0] : undefined });
                     setCustomInputs((prev) => {
                       const next = { ...prev };
                       delete next['mewolf_custom'];
@@ -568,7 +575,7 @@ export default function AutoStrategyPanel() {
                     const nums = parseNumbers(
                       getCustomInput('vote_custom', autoStrategies.vote.customTarget ? [autoStrategies.vote.customTarget] : undefined),
                     );
-                    updateStrategy('vote', { customTarget: nums[0] });
+                    updateStrategy('vote', { customTarget: nums.length > 0 ? nums[0] : undefined });
                     setCustomInputs((prev) => {
                       const next = { ...prev };
                       delete next['vote_custom'];
@@ -604,7 +611,7 @@ export default function AutoStrategyPanel() {
                     const nums = parseNumbers(
                       getCustomInput('hunter_custom', autoStrategies.hunterGun.customTarget ? [autoStrategies.hunterGun.customTarget] : undefined),
                     );
-                    updateStrategy('hunterGun', { customTarget: nums[0] });
+                    updateStrategy('hunterGun', { customTarget: nums.length > 0 ? nums[0] : undefined });
                     setCustomInputs((prev) => {
                       const next = { ...prev };
                       delete next['hunter_custom'];
@@ -640,7 +647,7 @@ export default function AutoStrategyPanel() {
                     const nums = parseNumbers(
                       getCustomInput('wkgun_custom', autoStrategies.wolfKingGun.customTarget ? [autoStrategies.wolfKingGun.customTarget] : undefined),
                     );
-                    updateStrategy('wolfKingGun', { customTarget: nums[0] });
+                    updateStrategy('wolfKingGun', { customTarget: nums.length > 0 ? nums[0] : undefined });
                     setCustomInputs((prev) => {
                       const next = { ...prev };
                       delete next['wkgun_custom'];
@@ -683,7 +690,7 @@ export default function AutoStrategyPanel() {
                         const nums = parseNumbers(
                           getCustomInput('wwexp_custom', autoStrategies.whiteWolfExplode.customTarget ? [autoStrategies.whiteWolfExplode.customTarget] : undefined),
                         );
-                        updateStrategy('whiteWolfExplode', { customTarget: nums[0] });
+                        updateStrategy('whiteWolfExplode', { customTarget: nums.length > 0 ? nums[0] : undefined });
                         setCustomInputs((prev) => {
                           const next = { ...prev };
                           delete next['wwexp_custom'];
@@ -728,7 +735,7 @@ export default function AutoStrategyPanel() {
                         const nums = parseNumbers(
                           getCustomInput('knight_custom', autoStrategies.knightDuel.customTarget ? [autoStrategies.knightDuel.customTarget] : undefined),
                         );
-                        updateStrategy('knightDuel', { customTarget: nums[0] });
+                        updateStrategy('knightDuel', { customTarget: nums.length > 0 ? nums[0] : undefined });
                         setCustomInputs((prev) => {
                           const next = { ...prev };
                           delete next['knight_custom'];

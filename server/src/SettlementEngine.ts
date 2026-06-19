@@ -20,11 +20,13 @@ import type {
   DayDeathRecord,
   RoleId,
   WinCondition,
+  HunterDeathShootCause,
 } from '@langrensha/shared';
 import {
   isEvilRole,
   isGodRole,
   isVillagerRole,
+  isImitationFailRole,
   ROLE_META,
 } from '@langrensha/shared';
 
@@ -121,27 +123,59 @@ export interface DeathChainResult {
  * 解析死亡连锁
  * 判断死亡是否触发连锁技能（猎人/狼王开枪）
  * @param deadPlayer 死亡玩家
+ * @param poisonBlockGun 吃毒是否封印技能（来自 RuleConfig）
+ * @param hunterDeathShootCauses 猎人死亡可开枪的死因列表
  * @returns 连锁结算结果
  */
-export function resolveDeathChain(deadPlayer: Player): DeathChainResult {
+export function resolveDeathChain(
+  deadPlayer: Player,
+  poisonBlockGun: boolean = false,
+  hunterDeathShootCauses?: HunterDeathShootCause[],
+): DeathChainResult {
   const result: DeathChainResult = {
     deaths: [],
     hasChain: false,
   };
 
-  // 猎人死亡 → 可开枪（如果尚未开枪）
+  // 猎人死亡 → 可开枪（如果尚未开枪，且非被毒杀封印，且死因允许开枪）
   if (deadPlayer.role === 'hunter' && !deadPlayer.hunterGunFired) {
-    result.hasChain = true;
-    result.chainTrigger = deadPlayer;
+    const isPoisoned = deadPlayer.deathCause === 'witch_poison';
+    const poisonBlocked = isPoisoned && poisonBlockGun;
+    const causeAllowed = isHunterShootCauseAllowed(deadPlayer.deathCause, hunterDeathShootCauses);
+    if (!poisonBlocked && causeAllowed) {
+      result.hasChain = true;
+      result.chainTrigger = deadPlayer;
+    }
   }
 
-  // 狼王死亡 → 可开枪（如果尚未开枪）
+  // 狼王死亡 → 可开枪（如果尚未开枪，且非被毒杀封印）
   if (deadPlayer.role === 'wolf_king' && !deadPlayer.wolfKingGunFired) {
-    result.hasChain = true;
-    result.chainTrigger = deadPlayer;
+    const isPoisoned = deadPlayer.deathCause === 'witch_poison';
+    if (!(isPoisoned && poisonBlockGun)) {
+      result.hasChain = true;
+      result.chainTrigger = deadPlayer;
+    }
   }
 
   return result;
+}
+
+/**
+ * 判断猎人的死因是否允许开枪
+ */
+function isHunterShootCauseAllowed(
+  deathCause: DeathCause | null,
+  allowedCauses?: HunterDeathShootCause[],
+): boolean {
+  if (!allowedCauses || allowedCauses.length === 0) return true;
+  if (!deathCause) return false;
+  const causeMap: Partial<Record<DeathCause, HunterDeathShootCause>> = {
+    witch_poison: 'witch_poison',
+    werewolf_kill: 'werewolf_kill',
+    vote_out: 'vote_out',
+  };
+  const mapped = causeMap[deathCause];
+  return mapped ? allowedCauses.includes(mapped) : false;
 }
 
 // ============================================================================
@@ -245,12 +279,14 @@ export function calculateSpeechOrder(
  * @param votes 投票记录（投票者座位号 → 目标座位号）
  * @param sheriffSeat 警长座位号（如果有）
  * @param sheriffVoteWeight 警长投票权重
+ * @param votedVoters 已投票的投票者集合（用于防止重复投票）
  * @returns 结算结果
  */
 export function resolveVoteResult(
   votes: Record<number, number | null>,
   sheriffSeat: number | null,
   sheriffVoteWeight: number = 1.5,
+  votedVoters?: Set<number>,
 ): {
   /** 各目标得票数 */
   voteCounts: Record<number, number>;
@@ -262,12 +298,23 @@ export function resolveVoteResult(
   pkCandidates: number[];
 } {
   const voteCounts: Record<number, number> = {};
+  const seenVoters = new Set<number>();
 
-  // 统计票数
-  for (const [voterSeat, targetSeat] of Object.entries(votes)) {
+  // 统计票数（防止重复投票）
+  for (const [voterSeatStr, targetSeat] of Object.entries(votes)) {
+    const voterSeat = parseInt(voterSeatStr);
+
+    // 跳过弃票
     if (targetSeat === null) continue;
 
-    const weight = sheriffSeat && parseInt(voterSeat) === sheriffSeat
+    // 跳过重复投票（同一投票者多次投票只计第一次）
+    if (seenVoters.has(voterSeat)) continue;
+    seenVoters.add(voterSeat);
+
+    // 如果提供了已投票集合，也检查是否已投过
+    if (votedVoters && votedVoters.has(voterSeat)) continue;
+
+    const weight = sheriffSeat && voterSeat === sheriffSeat
       ? sheriffVoteWeight
       : 1;
 
@@ -323,9 +370,7 @@ export function canMechanicalWolfActAsWolf(player: Player): boolean {
  * @returns 是否模仿失败
  */
 export function isMechanicalWolfImitationFailed(imitatedRole: RoleId): boolean {
-  // 模仿村民、骑士、白痴时失败
-  const failRoles: RoleId[] = ['villager', 'knight', 'idiot'];
-  return failRoles.includes(imitatedRole);
+  return isImitationFailRole(imitatedRole);
 }
 
 /**

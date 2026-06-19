@@ -106,6 +106,64 @@ const ADMIN_SECRET = process.env.ADMIN_SECRET || '';
 const lobby = new LobbyManager();
 
 // ============================================================================
+// 状态快照持久化（用于 tsx watch 热重载后恢复游戏状态）
+// ============================================================================
+
+const SNAPSHOT_FILE = path.join(process.cwd(), '.game-snapshot.json');
+const SNAPSHOT_INTERVAL = 5000; // 每 5 秒保存一次快照
+let snapshotTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * 保存游戏状态快照到文件
+ */
+function saveSnapshot(): void {
+  try {
+    if (lobby.getRoomCount() === 0) {
+      // 没有活跃房间时删除旧快照文件
+      try { fs.unlinkSync(SNAPSHOT_FILE); } catch {}
+      return;
+    }
+    const snapshot = lobby.exportSnapshot();
+    const data = JSON.stringify(snapshot);
+    // 先写入临时文件，再原子重命名，防止崩溃时留下损坏文件
+    const tmpFile = SNAPSHOT_FILE + '.tmp';
+    fs.writeFileSync(tmpFile, data, 'utf-8');
+    fs.renameSync(tmpFile, SNAPSHOT_FILE);
+  } catch (error) {
+    console.error('[Snapshot] 保存快照失败:', error);
+  }
+}
+
+/**
+ * 从文件恢复游戏状态快照
+ */
+function loadSnapshot(): boolean {
+  try {
+    if (!fs.existsSync(SNAPSHOT_FILE)) return false;
+    const data = fs.readFileSync(SNAPSHOT_FILE, 'utf-8');
+    const snapshot = JSON.parse(data);
+    if (!snapshot.rooms || snapshot.rooms.length === 0) return false;
+    lobby.restoreFromSnapshot(snapshot);
+    console.log(`[Snapshot] 已恢复 ${snapshot.rooms.length} 个房间的游戏状态`);
+    // 恢复后删除快照文件（避免重复恢复）
+    try { fs.unlinkSync(SNAPSHOT_FILE); } catch {}
+    return true;
+  } catch (error) {
+    console.error('[Snapshot] 恢复快照失败:', error);
+    try { fs.unlinkSync(SNAPSHOT_FILE); } catch {}
+    return false;
+  }
+}
+
+/**
+ * 启动定期快照保存
+ */
+function startSnapshotTimer(): void {
+  if (snapshotTimer) clearInterval(snapshotTimer);
+  snapshotTimer = setInterval(saveSnapshot, SNAPSHOT_INTERVAL);
+}
+
+// ============================================================================
 // DTO 脱敏层 (Anti-Cheat State Stripping)
 // ============================================================================
 
@@ -253,6 +311,18 @@ function buildPlayerRoomStateDTO(state: RoomState, forPlayerId: string, engine: 
 
       return null;
     })(),
+    pendingDeathSkills: state.pendingDeathSkills.map((s) => ({
+      seatNumber: s.seatNumber,
+      role: s.role,
+      used: s.used,
+    })),
+    myPendingDeathSkill: (() => {
+      if (!player) return null;
+      const skill = state.pendingDeathSkills.find(
+        (s) => s.seatNumber === player.seatNumber && !s.used,
+      );
+      return skill ?? null;
+    })(),
   };
 }
 
@@ -287,6 +357,7 @@ function buildJudgeRoomStateDTO(state: RoomState): JudgeRoomStateDTO {
     wolfVoteConsensus: state.wolfVoteConsensus,
     wolfChatMessages: state.wolfChatMessages,
     sheriffElectionVotes: state.sheriffElectionVotes,
+    pendingDeathSkills: state.pendingDeathSkills,
   };
 }
 
@@ -320,7 +391,15 @@ function broadcastRoomState(roomCode: string): void {
   let judgeSerialized: string | null = null;
 
   for (const client of clients) {
-    if (!client.ws || client.ws.readyState !== WebSocket.OPEN) continue;
+    if (!client.ws) {
+      if (!client.disconnected) {
+        console.warn(`[WS] 客户端 ${client.playerId} 的 ws 为 null 但未标记为断连，标记为断连`);
+        client.disconnected = true;
+        client.disconnectedAt = client.disconnectedAt ?? Date.now();
+      }
+      continue;
+    }
+    if (client.ws.readyState !== WebSocket.OPEN) continue;
 
     let serialized: string;
 
@@ -373,7 +452,7 @@ function sendToJudge(roomCode: string, message: ServerMessage): void {
   // 预序列化：法官消息只 stringify 一次
   const serialized = JSON.stringify(message);
   for (const client of clients) {
-    if (client.isJudge && client.ws.readyState === WebSocket.OPEN) {
+    if (client.isJudge && client.ws && client.ws.readyState === WebSocket.OPEN) {
       try {
         client.ws.send(serialized);
       } catch (error) {
@@ -388,7 +467,7 @@ function sendToJudge(roomCode: string, message: ServerMessage): void {
  */
 function sendToPlayer(playerId: string, message: ServerMessage): void {
   const client = lobby.getClient(playerId);
-  if (client && client.ws.readyState === WebSocket.OPEN) {
+  if (client && client.ws && client.ws.readyState === WebSocket.OPEN) {
     safeSend(client.ws, message);
   }
 }
@@ -504,6 +583,10 @@ function handleMessage(ws: WebSocket, rawMessage: string): void {
 
     case 'WOLF_KING_GUN':
       handleWolfKingGun(client, message);
+      break;
+
+    case 'SKIP_DEATH_SKILL':
+      handleSkipDeathSkill(client);
       break;
 
     case 'SPEECH':
@@ -656,6 +739,61 @@ function handleJoinRoom(client: ClientContext, message: ClientMessage & { type: 
     return;
   }
 
+  // 先尝试昵称重连（游戏进行中，同昵称断连玩家自动恢复）
+  const rejoinResult = lobby.rejoinByNickname(
+    message.nickname,
+    message.roomCode,
+    ws,
+  );
+
+  if (!rejoinResult.success) {
+    safeSend(ws, { type: 'ERROR', code: 'JOIN_FAILED', message: rejoinResult.error! });
+    return;
+  }
+
+  if (rejoinResult.reconnected) {
+    // 昵称重连成功
+    // 清理新连接时创建的临时 context
+    if (rejoinResult.newPlayerId) {
+      lobby.removeClientContext(rejoinResult.newPlayerId);
+    }
+
+    // 发送重连成功消息
+    safeSend(ws, {
+      type: 'RECONNECT_SUCCESS',
+      playerId: rejoinResult.playerId!,
+      roomCode: rejoinResult.roomCode!,
+    });
+
+    // 广播房间状态（让其他玩家看到该玩家已重连）
+    broadcastRoomState(rejoinResult.roomCode!);
+
+    // 如果游戏已结束，额外推送 GAME_OVER 消息
+    if (rejoinResult.phase === 'GAME_OVER') {
+      const engine = lobby.getRoom(rejoinResult.roomCode!);
+      if (engine) {
+        const state = engine.getState();
+        safeSend(ws, {
+          type: 'GAME_OVER',
+          winner: state.winner!,
+          finalStats: state.players
+            .filter((p) => !p.isJudge)
+            .map((p) => ({
+              seatNumber: p.seatNumber,
+              nickname: p.nickname,
+              role: p.role,
+              status: p.status,
+              deathCause: p.deathCause,
+              deathRound: p.deathRound,
+            })),
+        } satisfies ServerMessage);
+      }
+    }
+
+    return;
+  }
+
+  // 非重连场景 → 正常加入房间
   const result = lobby.joinRoom(
     message.nickname,
     message.roomCode,
@@ -690,10 +828,12 @@ function handleLeaveRoom(client: ClientContext): void {
   const roomCode = client.roomCode;
   if (!roomCode) return;
 
-  // 在离开前获取座位号和房间引擎
+  // Bug 78: 在调用 leaveRoom 之前保存座位号和昵称
+  // leaveRoom 可能会修改客户端上下文（如清除 roomCode）
   const engine = lobby.getRoom(roomCode);
   const player = engine ? engine.getState().players.find((p) => p.id === client.playerId) : undefined;
   const leftSeat = player?.seatNumber ?? 0;
+  const leftNickname = client.nickname || player?.nickname || '';
 
   const result = lobby.leaveRoom(client.playerId);
 
@@ -702,7 +842,7 @@ function handleLeaveRoom(client: ClientContext): void {
     broadcastToRoom(result.roomCode, {
       type: 'PLAYER_LEFT',
       seatNumber: leftSeat,
-      nickname: client.nickname,
+      nickname: leftNickname,
     });
 
     broadcastRoomState(result.roomCode);
@@ -740,7 +880,7 @@ function handleDissolveRoom(client: ClientContext): void {
   // 预序列化：解散消息只 stringify 一次
   const serializedDissolve = JSON.stringify(dissolveMessage);
   for (const c of clients) {
-    if (c.ws.readyState === WebSocket.OPEN) {
+    if (c.ws && c.ws.readyState === WebSocket.OPEN) {
       try {
         c.ws.send(serializedDissolve);
       } catch (error) {
@@ -790,6 +930,12 @@ function handleStartGame(client: ClientContext): void {
     return;
   }
 
+  const notReadyPlayers = state.players.filter((p) => !p.isJudge && !p.isReady && p.status === 'alive');
+  if (notReadyPlayers.length > 0) {
+    safeSend(client.ws, { type: 'ERROR', code: 'START_FAILED', message: `以下玩家未准备：${notReadyPlayers.map((p) => `${p.seatNumber}号`).join('、')}` });
+    return;
+  }
+
   const result = engine.startGame();
   if (!result.success) {
     safeSend(client.ws, { type: 'ERROR', code: 'START_FAILED', message: result.error! });
@@ -817,8 +963,17 @@ function handleNightAction(client: ClientContext, message: ClientMessage & { typ
     message.extra,
   );
 
+  // Bug 69: 完善错误处理，通知玩家提交失败
   if (!result.success) {
     safeSend(client.ws, { type: 'ERROR', code: 'NIGHT_ACTION_FAILED', message: result.error! });
+    // 同时发送行动失败结果，让前端可以更新 UI 状态
+    safeSend(client.ws, {
+      type: 'NIGHT_ACTION_RESULT',
+      roleId: message.roleId,
+      seerResult: null,
+      success: false,
+      failReason: result.error ?? '夜间行动提交失败',
+    });
     return;
   }
 
@@ -847,6 +1002,28 @@ function handleDayVote(client: ClientContext, message: ClientMessage & { type: '
   const engine = lobby.getRoom(client.roomCode);
   if (!engine) return;
 
+  // Bug 62: 校验玩家状态
+  const state = engine.getState();
+  const player = state.players.find((p) => p.id === client.playerId);
+  if (!player) {
+    safeSend(client.ws, { type: 'ERROR', code: 'VOTE_FAILED', message: '玩家不存在' });
+    return;
+  }
+  if (player.status !== 'alive') {
+    safeSend(client.ws, { type: 'ERROR', code: 'VOTE_FAILED', message: '你已死亡，无法投票' });
+    return;
+  }
+  // 检查是否已投票
+  if (state.votes && state.votes[player.seatNumber] !== undefined) {
+    safeSend(client.ws, { type: 'ERROR', code: 'VOTE_FAILED', message: '你已经投过票了' });
+    return;
+  }
+  // PK投票阶段：检查玩家是否在PK候选人列表中（仅限PK阶段投票目标校验）
+  if (state.phase === 'PK_VOTE' && message.targetSeat !== null && !state.pkCandidates.includes(message.targetSeat)) {
+    safeSend(client.ws, { type: 'ERROR', code: 'VOTE_FAILED', message: 'PK投票只能投给候选人' });
+    return;
+  }
+
   const result = engine.submitVote(client.playerId, message.targetSeat);
   if (!result.success) {
     safeSend(client.ws, { type: 'ERROR', code: 'VOTE_FAILED', message: result.error! });
@@ -861,6 +1038,11 @@ function handleSheriffElectionVote(client: ClientContext, message: ClientMessage
 
   const engine = lobby.getRoom(client.roomCode);
   if (!engine) return;
+
+  if (client.isJudge) {
+    safeSend(client.ws, { type: 'ERROR', code: 'SHERIFF_ELECTION_VOTE_FAILED', message: '法官不能参与警长选举投票' });
+    return;
+  }
 
   const result = engine.submitSheriffElectionVote(client.playerId, message.targetSeat);
   if (!result.success) {
@@ -905,6 +1087,12 @@ function handleReconnect(client: ClientContext, message: ClientMessage & { type:
 
   const reconnectedContext = result.context!;
 
+  // Bug 60: 检查 reconnectedContext 是否存在
+  if (!reconnectedContext) {
+    safeSend(ws, { type: 'ERROR', code: 'RECONNECT_FAILED', message: '重连上下文不存在' });
+    return;
+  }
+
   // 发送重连成功消息
   const rc = reconnectedContext.roomCode!;
   safeSend(ws, { type: 'RECONNECT_SUCCESS', playerId: reconnectedContext.playerId, roomCode: rc });
@@ -919,6 +1107,17 @@ function handleKnightDuel(client: ClientContext, message: ClientMessage & { type
   const engine = lobby.getRoom(client.roomCode);
   if (!engine) return;
 
+  const state = engine.getState();
+  const player = state.players.find((p) => p.id === client.playerId);
+  if (!player || player.role !== 'knight') {
+    safeSend(client.ws, { type: 'ERROR', code: 'DUEL_FAILED', message: '只有骑士可以发起决斗' });
+    return;
+  }
+  if (player.status !== 'alive') {
+    safeSend(client.ws, { type: 'ERROR', code: 'DUEL_FAILED', message: '你已经死亡，无法发起决斗' });
+    return;
+  }
+
   const result = engine.handleKnightDuel(client.playerId, message.targetSeat);
   if (!result.success) {
     safeSend(client.ws, { type: 'ERROR', code: 'DUEL_FAILED', message: result.error! });
@@ -928,6 +1127,7 @@ function handleKnightDuel(client: ClientContext, message: ClientMessage & { type
   // 广播决斗结果
   const knightState = engine.getState();
   const knight = knightState.players.find((p) => p.id === client.playerId);
+  const targetPlayer = knightState.players.find((p) => p.seatNumber === message.targetSeat);
   broadcastToRoom(client.roomCode, {
     type: 'KNIGHT_DUEL_RESULT',
     knightSeat: knight?.seatNumber ?? 0,
@@ -935,6 +1135,7 @@ function handleKnightDuel(client: ClientContext, message: ClientMessage & { type
     targetIsWolf: result.result?.targetIsWolf ?? false,
     knightDied: result.result?.knightDied ?? false,
     forceNight: result.result?.forceNight ?? false,
+    revealedRole: result.result?.revealedRole ?? (targetPlayer?.role ?? undefined),
   });
 
   broadcastRoomState(client.roomCode);
@@ -944,7 +1145,22 @@ function handleWhiteWolfExplode(client: ClientContext, message: ClientMessage & 
   if (!client.roomCode) return;
 
   const engine = lobby.getRoom(client.roomCode);
-  if (!engine) return;
+  // Bug 64: engine 为 null 时返回错误给客户端
+  if (!engine) {
+    safeSend(client.ws, { type: 'ERROR', code: 'ROOM_NOT_FOUND', message: '房间不存在' });
+    return;
+  }
+
+  const state = engine.getState();
+  const player = state.players.find((p) => p.id === client.playerId);
+  if (!player || player.role !== 'white_wolf_king') {
+    safeSend(client.ws, { type: 'ERROR', code: 'EXPLODE_FAILED', message: '只有白狼王可以自爆' });
+    return;
+  }
+  if (player.status !== 'alive') {
+    safeSend(client.ws, { type: 'ERROR', code: 'EXPLODE_FAILED', message: '你已经死亡，无法自爆' });
+    return;
+  }
 
   const result = engine.handleWhiteWolfExplode(client.playerId, message.targetSeat);
   if (!result.success) {
@@ -967,7 +1183,22 @@ function handleHunterGun(client: ClientContext, message: ClientMessage & { type:
   if (!client.roomCode) return;
 
   const engine = lobby.getRoom(client.roomCode);
-  if (!engine) return;
+  // Bug 65: engine 为 null 时返回错误给客户端
+  if (!engine) {
+    safeSend(client.ws, { type: 'ERROR', code: 'ROOM_NOT_FOUND', message: '房间不存在' });
+    return;
+  }
+
+  const state = engine.getState();
+  const player = state.players.find((p) => p.id === client.playerId);
+  if (!player || player.role !== 'hunter') {
+    safeSend(client.ws, { type: 'ERROR', code: 'HUNTER_GUN_FAILED', message: '只有猎人可以开枪' });
+    return;
+  }
+  if (player.status !== 'dead') {
+    safeSend(client.ws, { type: 'ERROR', code: 'HUNTER_GUN_FAILED', message: '只有死亡后才能开枪' });
+    return;
+  }
 
   const result = engine.triggerHunterGun(client.playerId, message.targetSeat);
   if (!result.success) {
@@ -975,7 +1206,6 @@ function handleHunterGun(client: ClientContext, message: ClientMessage & { type:
     return;
   }
 
-  const state = engine.getState();
   const hunter = state.players.find((p) => p.id === client.playerId);
   const target = state.players.find((p) => p.seatNumber === message.targetSeat);
 
@@ -993,7 +1223,22 @@ function handleWolfKingGun(client: ClientContext, message: ClientMessage & { typ
   if (!client.roomCode) return;
 
   const engine = lobby.getRoom(client.roomCode);
-  if (!engine) return;
+  // Bug 66: engine 为 null 时返回错误给客户端
+  if (!engine) {
+    safeSend(client.ws, { type: 'ERROR', code: 'ROOM_NOT_FOUND', message: '房间不存在' });
+    return;
+  }
+
+  const state = engine.getState();
+  const player = state.players.find((p) => p.id === client.playerId);
+  if (!player || player.role !== 'wolf_king') {
+    safeSend(client.ws, { type: 'ERROR', code: 'WOLF_KING_GUN_FAILED', message: '只有狼王可以开枪' });
+    return;
+  }
+  if (player.status !== 'dead') {
+    safeSend(client.ws, { type: 'ERROR', code: 'WOLF_KING_GUN_FAILED', message: '只有死亡后才能开枪' });
+    return;
+  }
 
   const result = engine.triggerWolfKingGun(client.playerId, message.targetSeat);
   if (!result.success) {
@@ -1001,7 +1246,6 @@ function handleWolfKingGun(client: ClientContext, message: ClientMessage & { typ
     return;
   }
 
-  const state = engine.getState();
   const wolfKing = state.players.find((p) => p.id === client.playerId);
   const target = state.players.find((p) => p.seatNumber === message.targetSeat);
 
@@ -1015,6 +1259,21 @@ function handleWolfKingGun(client: ClientContext, message: ClientMessage & { typ
   broadcastRoomState(client.roomCode);
 }
 
+function handleSkipDeathSkill(client: ClientContext): void {
+  if (!client.roomCode) return;
+
+  const engine = lobby.getRoom(client.roomCode);
+  if (!engine) return;
+
+  const result = engine.skipDeathSkill(client.playerId);
+  if (!result.success) {
+    safeSend(client.ws, { type: 'ERROR', code: 'SKIP_DEATH_SKILL_FAILED', message: result.error! });
+    return;
+  }
+
+  broadcastRoomState(client.roomCode);
+}
+
 function handleSpeech(client: ClientContext, message: ClientMessage & { type: 'SPEECH' }): void {
   if (!client.roomCode) return;
 
@@ -1022,16 +1281,30 @@ function handleSpeech(client: ClientContext, message: ClientMessage & { type: 'S
   if (!engine) return;
 
   const state = engine.getState();
+
+  // Bug 56: 校验游戏阶段必须为 DAY_SPEECH
+  if (state.phase !== 'DAY_SPEECH') {
+    safeSend(client.ws, { type: 'ERROR', code: 'INVALID_PHASE', message: '当前不在发言阶段' });
+    return;
+  }
+
   const player = state.players.find((p) => p.id === client.playerId);
   if (!player || player.status !== 'alive') return;
   if (player.isMuted) return; // 被禁言的玩家不能发言
+
+  // Bug 57: 校验当前发言者是否为该玩家
+  const currentSpeakerSeat = state.speechOrder[state.currentSpeakerIndex] ?? null;
+  if (currentSpeakerSeat === null || player.seatNumber !== currentSpeakerSeat) {
+    safeSend(client.ws, { type: 'ERROR', code: 'NOT_CURRENT_SPEAKER', message: '当前不是你的发言回合' });
+    return;
+  }
 
   // Bug 65 修复：发言内容长度和格式校验
   const MAX_SPEECH_LENGTH = 500; // 最大发言长度
   const content = message.content?.trim() ?? '';
   
-  if (content.length === 0) return; // 空发言不广播
-  if (content.length > MAX_SPEECH_LENGTH) {
+  if ([...content].length === 0) return; // 空发言不广播
+  if ([...content].length > MAX_SPEECH_LENGTH) {
     // 发言过长，仅发送错误提示给发言者
     safeSend(client.ws, {
       type: 'ERROR',
@@ -1088,8 +1361,14 @@ function handleAppeal(client: ClientContext, message: ClientMessage & { type: 'A
     return;
   }
 
-  // 广播申诉事件给房间内所有人
+  // Bug 63: 校验 eventId 是否有效
   const eventId = message.eventId;
+  if (!eventId || typeof eventId !== 'string' || eventId.trim().length === 0) {
+    safeSend(client.ws, { type: 'ERROR', code: 'APPEAL_FAILED', message: '申诉事件ID无效' });
+    return;
+  }
+
+  // 广播申诉事件给房间内所有人
   broadcastToRoom(client.roomCode, {
     type: 'APPEAL_EVENT',
     eventId,
@@ -1163,6 +1442,13 @@ function handleJudgeOverrideSettlement(client: ClientContext, message: ClientMes
   const engine = lobby.getRoom(client.roomCode);
   if (!engine) return;
 
+  // Bug 68: 严格验证法官身份 — 确认引擎中的玩家数据也标记为法官
+  const judgePlayer = engine.getState().players.find((p) => p.id === client.playerId);
+  if (!judgePlayer || !judgePlayer.isJudge) {
+    safeSend(client.ws, { type: 'ERROR', code: 'NOT_JUDGE', message: '法官身份验证失败' });
+    return;
+  }
+
   const result = engine.overrideSettlement(
     client.playerId,
     message.targetSeat,
@@ -1193,6 +1479,13 @@ function handleJudgeForceNextPhase(client: ClientContext): void {
 
   const engine = lobby.getRoom(client.roomCode);
   if (!engine) return;
+
+  // Bug 67: 严格验证法官身份 — 确认引擎中的玩家数据也标记为法官
+  const judgePlayer = engine.getState().players.find((p) => p.id === client.playerId);
+  if (!judgePlayer || !judgePlayer.isJudge) {
+    safeSend(client.ws, { type: 'ERROR', code: 'NOT_JUDGE', message: '法官身份验证失败' });
+    return;
+  }
 
   const result = engine.forceNextPhase(client.playerId);
   if (!result.success) {
@@ -1245,13 +1538,22 @@ function handleJudgeModifySpeechOrder(client: ClientContext, message: ClientMess
 function handleJudgeTriggerKnightDuel(client: ClientContext, message: ClientMessage & { type: 'JUDGE_TRIGGER_KNIGHT_DUEL' }): void {
   if (!client.roomCode || !client.isJudge) return;
   const engine = lobby.getRoom(client.roomCode);
-  if (!engine) return;
+  // Bug 80: engine 为 null 时返回错误给客户端
+  if (!engine) {
+    safeSend(client.ws, { type: 'ERROR', code: 'ROOM_NOT_FOUND', message: '房间不存在' });
+    return;
+  }
 
   // 法官代操作：使用骑士座位号对应的玩家ID
   const state = engine.getState();
   const knight = state.players.find((p) => p.seatNumber === message.knightSeat);
   if (!knight) {
     safeSend(client.ws, { type: 'ERROR', code: 'INVALID_TARGET', message: '骑士座位号无效' });
+    return;
+  }
+  const target = state.players.find((p) => p.seatNumber === message.targetSeat);
+  if (!target) {
+    safeSend(client.ws, { type: 'ERROR', code: 'INVALID_TARGET', message: '目标座位号无效' });
     return;
   }
 
@@ -1268,6 +1570,7 @@ function handleJudgeTriggerKnightDuel(client: ClientContext, message: ClientMess
     targetIsWolf: result.result?.targetIsWolf ?? false,
     knightDied: result.result?.knightDied ?? false,
     forceNight: result.result?.forceNight ?? false,
+    revealedRole: result.result?.revealedRole,
   });
 
   broadcastJudgeAction(
@@ -1288,6 +1591,11 @@ function handleJudgeTriggerWhiteWolf(client: ClientContext, message: ClientMessa
   const wolf = state.players.find((p) => p.seatNumber === message.wolfSeat);
   if (!wolf) {
     safeSend(client.ws, { type: 'ERROR', code: 'INVALID_TARGET', message: '白狼王座位号无效' });
+    return;
+  }
+  const target = state.players.find((p) => p.seatNumber === message.targetSeat);
+  if (!target) {
+    safeSend(client.ws, { type: 'ERROR', code: 'INVALID_TARGET', message: '目标座位号无效' });
     return;
   }
 
@@ -1347,7 +1655,17 @@ function handleWolfChat(client: ClientContext, message: ClientMessage & { type: 
   const player = state.players.find((p) => p.id === client.playerId);
   if (!player) return;
 
-  const result = engine.submitWolfChat(client.playerId, message.content);
+  const content = message.content?.trim() ?? '';
+  if (!content || [...content].length > 500) {
+    safeSend(client.ws, { type: 'ERROR', code: 'WOLF_CHAT_FAILED', message: '消息内容不合法' });
+    return;
+  }
+  if (/[<>&'"]/.test(content)) {
+    safeSend(client.ws, { type: 'ERROR', code: 'WOLF_CHAT_FAILED', message: '消息内容包含非法字符' });
+    return;
+  }
+
+  const result = engine.submitWolfChat(client.playerId, content);
   if (!result.success) {
     safeSend(client.ws, { type: 'ERROR', code: 'WOLF_CHAT_FAILED', message: result.error! });
     return;
@@ -1360,7 +1678,7 @@ function handleWolfChat(client: ClientContext, message: ClientMessage & { type: 
     round: state.round,
     senderSeat: player.seatNumber,
     senderNickname: player.nickname,
-    content: message.content,
+    content: content,
     timestamp: Date.now(),
     visibility: 'wolf_only',
   };
@@ -1372,6 +1690,7 @@ function handleWolfChat(client: ClientContext, message: ClientMessage & { type: 
   });
 
   for (const wolfClient of wolfClients) {
+    if (!wolfClient.ws || wolfClient.ws.readyState !== WebSocket.OPEN) continue;
     safeSend(wolfClient.ws, {
       type: 'WOLF_CHAT_HISTORY',
       messages: [chatMessage],
@@ -1392,6 +1711,18 @@ function handleWolfVote(client: ClientContext, message: ClientMessage & { type: 
 
   const engine = lobby.getRoom(client.roomCode);
   if (!engine) return;
+
+  // Bug 74: 添加额外验证 — 确认玩家是狼人且存活
+  const state = engine.getState();
+  const player = state.players.find((p) => p.id === client.playerId);
+  if (!player || player.status !== 'alive') {
+    safeSend(client.ws, { type: 'ERROR', code: 'WOLF_VOTE_FAILED', message: '只有存活玩家可以投票' });
+    return;
+  }
+  if (!isSharedWolfRole(player.role ?? 'villager', state.config.sharedWolfRoles)) {
+    safeSend(client.ws, { type: 'ERROR', code: 'WOLF_VOTE_FAILED', message: '只有狼人阵营可以参与狼人投票' });
+    return;
+  }
 
   // 通过 submitNightAction 提交狼人投票
   const result = engine.submitNightAction(
@@ -1425,7 +1756,8 @@ function handleDeadChat(client: ClientContext, message: ClientMessage & { type: 
   }
 
   const content = (message as any).content?.toString().trim();
-  if (!content || content.length > 500) {
+  // Bug 75: 使用 Array.from 进行精确的 Unicode 字符计数（避免 emoji 等多字节字符被误计）
+  if (!content || Array.from(content).length > 500) {
     safeSend(client.ws, { type: 'ERROR', code: 'INVALID_INPUT', message: '消息内容不合法' });
     return;
   }
@@ -1443,7 +1775,7 @@ function handleDeadChat(client: ClientContext, message: ClientMessage & { type: 
 
   for (const c of clients) {
     const p = state.players.find((pp) => pp.id === c.playerId);
-    if (p && p.status === 'dead' && c.ws.readyState === 1) { // WebSocket.OPEN = 1
+    if (p && p.status === 'dead' && c.ws && c.ws.readyState === 1) { // WebSocket.OPEN = 1
       safeSend(c.ws, deadChatMessage);
     }
   }
@@ -1481,6 +1813,19 @@ async function handleAdminFetchLogs(client: ClientContext, message: ClientMessag
 
   if (!isMongoConnected()) {
     safeSend(client.ws, { type: 'ERROR', code: 'DB_NOT_CONNECTED', message: '数据库未连接' });
+    return;
+  }
+
+  if (message.fromTime !== undefined && (typeof message.fromTime !== 'number' || message.fromTime < 0)) {
+    safeSend(client.ws, { type: 'ERROR', code: 'INVALID_PARAMS', message: 'fromTime 参数无效' });
+    return;
+  }
+  if (message.toTime !== undefined && (typeof message.toTime !== 'number' || message.toTime < 0)) {
+    safeSend(client.ws, { type: 'ERROR', code: 'INVALID_PARAMS', message: 'toTime 参数无效' });
+    return;
+  }
+  if (message.fromTime !== undefined && message.toTime !== undefined && message.fromTime > message.toTime) {
+    safeSend(client.ws, { type: 'ERROR', code: 'INVALID_PARAMS', message: 'fromTime 不能大于 toTime' });
     return;
   }
 
@@ -1546,6 +1891,11 @@ function handleAdminCleanupConfig(client: ClientContext, message: ClientMessage 
 
   if (!message.secret || !timingSafeEqual(message.secret, ADMIN_SECRET)) {
     safeSend(client.ws, { type: 'ERROR', code: 'FORBIDDEN', message: '管理员密钥错误' });
+    return;
+  }
+
+  if (!isMongoConnected()) {
+    safeSend(client.ws, { type: 'ERROR', code: 'DB_NOT_CONNECTED', message: '数据库未连接' });
     return;
   }
 
@@ -1630,7 +1980,11 @@ setInterval(flushLogs, LOG_FLUSH_INTERVAL);
  * 不阻塞主流程
  */
 function persistLog(log: ActionLog): void {
-  if (!isMongoConnected()) return;
+  // Bug 76: 检查 MongoDB 连接状态，未连接时记录警告
+  if (!isMongoConnected()) {
+    console.warn('[MongoDB] 数据库未连接，日志未持久化:', log.actionType, log.actorSeat);
+    return;
+  }
   _logBuffer.push({
     roomCode: log.roomCode,
     gameId: log.gameId,
@@ -1900,12 +2254,15 @@ const server = http.createServer((req, res) => {
   compressMiddleware(req as any, res as any, async () => {
     // 健康检查端点
     if (req.url === '/health') {
+      // Bug 77: 包含 MongoDB 连接状态的健康检查
+      const mongoConnected = isMongoConnected();
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
-        status: 'ok',
+        status: mongoConnected ? 'ok' : 'degraded',
         rooms: lobby.getRoomCount(),
         online: lobby.getOnlineCount(),
-        mongodb: isMongoConnected(),
+        mongodb: mongoConnected,
+        mongodbStatus: mongoConnected ? 'connected' : 'disconnected',
       }));
       return;
     }
@@ -2121,8 +2478,24 @@ wss.on('connection', (ws, req) => {
 
   ws.on('close', () => {
     console.log('[WS] 连接断开');
+    const client = lobby.getClientByWs(ws);
+    const playerId = client?.playerId;
+    const roomCode = client?.roomCode;
     const result = lobby.unregisterConnection(ws);
     if (result.roomCode) {
+      if (roomCode && playerId) {
+        const engine = lobby.getRoom(roomCode);
+        if (engine && engine.getState().phase !== 'LOBBY') {
+          const player = engine.getState().players.find((p) => p.id === playerId);
+          if (player) {
+            broadcastToRoom(roomCode, {
+              type: 'PLAYER_LEFT',
+              seatNumber: player.seatNumber,
+              nickname: player.nickname,
+            });
+          }
+        }
+      }
       broadcastRoomState(result.roomCode);
     }
   });
@@ -2145,6 +2518,12 @@ async function startServer(): Promise<void> {
     console.warn('[MongoDB] 未配置 MONGODB_URI，日志持久化功能不可用');
   }
 
+  // 从快照恢复游戏状态（tsx watch 热重载后恢复）
+  loadSnapshot();
+
+  // 启动定期快照保存
+  startSnapshotTimer();
+
   // 启动 HTTP + WebSocket 服务器
   server.listen(PORT, () => {
     const localUrl = `ws://localhost:${PORT}`;
@@ -2163,6 +2542,9 @@ async function startServer(): Promise<void> {
 // 优雅关闭
 process.on('SIGINT', async () => {
   console.log('\n[Server] 正在关闭...');
+  // 关闭前保存快照
+  saveSnapshot();
+  if (snapshotTimer) clearInterval(snapshotTimer);
   lobby.destroyAll();
   await disconnectMongoDB();
   server.close();
@@ -2171,10 +2553,28 @@ process.on('SIGINT', async () => {
 
 process.on('SIGTERM', async () => {
   console.log('\n[Server] 收到终止信号...');
+  // 关闭前保存快照
+  saveSnapshot();
+  if (snapshotTimer) clearInterval(snapshotTimer);
   lobby.destroyAll();
   await disconnectMongoDB();
   server.close();
   process.exit(0);
+});
+
+// 全局异常处理 — 防止未捕获的错误导致服务器崩溃
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[Server] 未处理的 Promise 拒绝:', reason);
+  // 不退出进程，仅记录错误
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('[Server] 未捕获的异常:', error);
+  // 对于严重错误，记录后继续运行
+  // 如果是致命错误（如数据库连接完全失败），可以选择优雅关闭
+  if (error.message.includes('ECONNREFUSED') || error.message.includes('MongoDB')) {
+    console.error('[Server] 检测到致命错误，尝试恢复...');
+  }
 });
 
 startServer().catch((error) => {

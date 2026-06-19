@@ -19,6 +19,7 @@ export default function NightmarePanel() {
 
   const [selected, setSelected] = useState<number | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   if (!nightActionRequest) return null;
 
@@ -28,7 +29,8 @@ export default function NightmarePanel() {
   };
 
   const handleConfirmAction = () => {
-    if (selected === null || isActionLocked) return;
+    if (selected === null || isActionLocked || isSubmitting) return;
+    setIsSubmitting(true);
     submitNightAction('nightmare_shadow', selected, { nightmareTarget: selected });
     setActionLocked(true);
     setConfirmOpen(false);

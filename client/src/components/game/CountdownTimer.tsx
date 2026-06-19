@@ -10,11 +10,14 @@ interface CountdownTimerProps {
   urgentThreshold?: number;
 }
 
+const MAX_COUNTDOWN_SECONDS = 3600;
+
 function CountdownTimer({
-  seconds,
+  seconds: rawSeconds,
   onExpire,
   urgentThreshold = 10,
 }: CountdownTimerProps) {
+  const seconds = Math.min(MAX_COUNTDOWN_SECONDS, Math.max(0, rawSeconds));
   const [remaining, setRemaining] = useState(seconds);
   const onExpireRef = useRef(onExpire);
   // Bug 5 修复：添加标记防止 onExpire 多次触发

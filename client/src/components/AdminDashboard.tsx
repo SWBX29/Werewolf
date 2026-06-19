@@ -45,6 +45,7 @@ const ACTION_TYPE_NAMES: Record<ActionType, string> = {
   HUNTER_GUN: '猎人开枪',
   WOLF_KING_GUN: '狼王开枪',
   IDIOT_REVEAL: '白痴翻牌',
+  DEATH_SKILL_SKIP: '跳过死亡技能',
   JUDGE_OVERRIDE_SETTLEMENT: '法官改判',
   JUDGE_FORCE_NEXT_PHASE: '法官强制下一阶段',
   JUDGE_PAUSE: '法官暂停',
@@ -183,7 +184,7 @@ const AdminDashboard: React.FC = () => {
     if (!isConnected) {
       connect(getWsUrl());
     }
-  }, []);
+  }, [isConnected, connect]);
 
   // 同步服务端分页状态
   useEffect(() => {

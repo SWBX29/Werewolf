@@ -88,6 +88,10 @@ interface VoiceState {
   /** 是否正在手动重连 */
   isManualReconnecting: boolean;
 
+  // ---- 操作反馈 ----
+  /** 操作反馈信息（用于显示操作成功提示） */
+  operationFeedback: { type: 'mic-on' | 'mic-off' | 'speaker-on' | 'speaker-off'; timestamp: number } | null;
+
   // ---- Actions ----
   setConnectionState: (state: ZegoConnectionState) => void;
   setVoiceEnabled: (enabled: boolean) => void;
@@ -109,6 +113,7 @@ interface VoiceState {
   setConnectionDuration: (duration: number) => void;
   setNetworkQuality: (quality: ZegoNetworkQualityEvent['upQuality'] | null) => void;
   updateConnectionDuration: () => void;
+  setOperationFeedback: (feedback: { type: 'mic-on' | 'mic-off' | 'speaker-on' | 'speaker-off'; timestamp: number } | null) => void;
 
   // ---- 语音房间生命周期 ----
   /** 初始化 Zego 引擎并注册事件回调 */
@@ -147,6 +152,7 @@ const initialState = {
   connectionDuration: 0,
   networkQuality: null as ZegoNetworkQualityEvent['upQuality'] | null,
   isManualReconnecting: false,
+  operationFeedback: null as { type: 'mic-on' | 'mic-off' | 'speaker-on' | 'speaker-off'; timestamp: number } | null,
 };
 
 // ==========================================================================
@@ -156,6 +162,8 @@ const initialState = {
 // 并发控制：Promise 队列确保语音操作串行执行
 let voiceOperationQueue: Promise<void> = Promise.resolve();
 let isProcessingVoiceOperation = false;
+// Bug 155 修复：加入房间操作的互斥锁
+let isJoiningRoom = false;
 
 /**
  * 获取时间戳日志前缀
@@ -301,9 +309,21 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
 
   setCanSpeak: (canSpeak) => set({ canSpeak }),
 
-  toggleMicrophone: () => set({ isMicrophoneMuted: !get().isMicrophoneMuted }),
+  toggleMicrophone: () => {
+    const newMuted = !get().isMicrophoneMuted;
+    // Bug 153 修复：同步到 ZegoVoiceService
+    const service = getZegoVoiceService();
+    service.muteMicrophone(newMuted);
+    set({ isMicrophoneMuted: newMuted });
+  },
 
-  toggleSpeaker: () => set({ isSpeakerMuted: !get().isSpeakerMuted }),
+  toggleSpeaker: () => {
+    const newMuted = !get().isSpeakerMuted;
+    // Bug 153 修复：同步到 ZegoVoiceService
+    const service = getZegoVoiceService();
+    service.muteSpeaker(newMuted);
+    set({ isSpeakerMuted: newMuted });
+  },
 
   dismissVoiceError: () => set({ voiceError: null }),
 
@@ -327,6 +347,8 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
     }
   },
 
+  setOperationFeedback: (operationFeedback) => set({ operationFeedback }),
+
   // ---- 语音房间生命周期 ----
 
   initVoice: async (appID: number) => {
@@ -345,6 +367,26 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
   joinVoiceRoom: async (roomID: string, userID: string, userName: string) => {
     const timestamp = getTimestamp();
     console.log(`[${timestamp}][VoiceStore] joinVoiceRoom 请求: roomID=${roomID}, userID=${userID}`);
+
+    // Bug 123 修复：严格校验 roomID
+    if (!roomID || typeof roomID !== 'string' || !roomID.trim()) {
+      set({ voiceError: '无效的房间号' });
+      return;
+    }
+
+    // Bug 152 修复：严格检查已在房间中的状态
+    const currentState = get();
+    if (currentState.connectionState === 'CONNECTED' && currentState.currentRoomID === roomID && currentState.currentUserID === userID) {
+      console.log(`[${getTimestamp()}][VoiceStore] 已在目标语音房间中，跳过加入`);
+      return;
+    }
+
+    // Bug 155 修复：互斥锁防止并发加入
+    if (isJoiningRoom) {
+      console.log(`[${getTimestamp()}][VoiceStore] 正在加入语音房间中，跳过重复请求`);
+      return;
+    }
+    isJoiningRoom = true;
 
     // 使用 Promise 队列确保操作串行执行
     return new Promise<void>((resolve) => {
@@ -428,6 +470,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
           console.error(`[${getTimestamp()}][VoiceStore] 加入语音房间异常:`, error);
         } finally {
           isProcessingVoiceOperation = false;
+          isJoiningRoom = false;
           resolve();
         }
       });
@@ -461,6 +504,7 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
         } catch (error) {
           console.error(`[${getTimestamp()}][VoiceStore] 退出语音房间异常:`, error);
         } finally {
+          // Bug 125/154 修复：退出房间时清除所有字段
           set({
             connectionState: 'DISCONNECTED',
             currentRoomID: null,
@@ -469,9 +513,14 @@ export const useVoiceStore = create<VoiceState>((set, get) => ({
             speakingUsers: {},
             isMicrophoneMuted: true,
             isSpeakerMuted: false,
+            nightVoiceMode: false,
+            voiceStatusHint: null,
+            voiceError: null,
             connectionStartTime: null,
             connectionDuration: 0,
             networkQuality: null,
+            isManualReconnecting: false,
+            operationFeedback: null,
           });
           isProcessingVoiceOperation = false;
           resolve();

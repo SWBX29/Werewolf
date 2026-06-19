@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSimulatorStore } from './simulator/useSimulatorStore';
+import { injectStateToGameStore } from './simulator/storeInjector';
 import { useGameStore } from '../useGameStore';
 import { PHASE_NAMES } from '@langrensha/shared';
 import RoomSetupPanel from './simulator/RoomSetupPanel';
@@ -48,11 +49,18 @@ const SimulatorView: React.FC = () => {
   const [strategyCollapsed, setStrategyCollapsed] = useState(false);
   const prevSelectedPlayerRef = useRef<string | null>(null);
 
+  // ---- 可拉伸面板状态 ----
+  const [leftPanelWidth, setLeftPanelWidth] = useState(320);
+  const leftDragRef = useRef(false);
+  const leftStartX = useRef(0);
+  const leftStartWidth = useRef(0);
+
   // ---- 连接数统计 ----
   const connectedCount = Array.from(connections.values()).filter(
     (c) => c.isConnected && !c.isJudge,
   ).length;
   const totalCount = Array.from(connections.values()).filter((c) => !c.isJudge).length;
+  const judgeConnected = useSimulatorStore((s) => s.judgeConnection?.isConnected ?? false);
 
   // ---- Tab 切换逻辑 ----
   const handleTabChange = useCallback(
@@ -79,12 +87,62 @@ const SimulatorView: React.FC = () => {
     setView('home');
   }, [disconnectAll, setView]);
 
+  // ---- 左侧面板拖拽调整宽度 ----
+  const handleLeftDragStart = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      leftDragRef.current = true;
+      leftStartX.current = e.clientX;
+      leftStartWidth.current = leftPanelWidth;
+
+      const handleMove = (ev: MouseEvent) => {
+        if (!leftDragRef.current) return;
+        const delta = ev.clientX - leftStartX.current;
+        const next = Math.max(200, Math.min(600, leftStartWidth.current + delta));
+        setLeftPanelWidth(next);
+      };
+
+      const handleUp = () => {
+        leftDragRef.current = false;
+        window.removeEventListener('mousemove', handleMove);
+        window.removeEventListener('mouseup', handleUp);
+      };
+
+      window.addEventListener('mousemove', handleMove);
+      window.addEventListener('mouseup', handleUp);
+    },
+    [leftPanelWidth],
+  );
+
   // ---- 组件卸载时清理 ----
   useEffect(() => {
     return () => {
       disconnectAll();
     };
   }, [disconnectAll]);
+
+  // ---- Sync simulator state to useGameStore ----
+  const playerStates = useSimulatorStore((s) => s.playerStates);
+  const judgeState = useSimulatorStore((s) => s.judgeState);
+
+  // 追踪 selectedPlayerId 变化，用于区分"切换玩家"和"状态更新"
+  const prevSelectedPlayerIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const isPlayerSwitch = prevSelectedPlayerIdRef.current !== selectedPlayerId;
+    prevSelectedPlayerIdRef.current = selectedPlayerId;
+
+    if (selectedPlayerId) {
+      const playerState = playerStates.get(selectedPlayerId);
+      const conn = connections.get(selectedPlayerId);
+      if (playerState && conn) {
+        // 切换玩家时完全重置，状态更新时只更新数据
+        injectStateToGameStore(playerState, conn, isPlayerSwitch);
+      }
+    } else if (judgeState && useSimulatorStore.getState().judgeConnection) {
+      injectStateToGameStore(judgeState, useSimulatorStore.getState().judgeConnection!, true);
+    }
+  }, [selectedPlayerId, playerStates, judgeState, connections]);
 
   // ---- Setup 阶段：显示 RoomSetupPanel ----
   if (simulatorPhase === 'setup') {
@@ -193,8 +251,11 @@ const SimulatorView: React.FC = () => {
 
       {/* ===== Main content ===== */}
       <div className="flex flex-1 overflow-hidden">
-        {/* ---- Left panel (320px) ---- */}
-        <div className="flex w-80 shrink-0 flex-col border-r border-gray-700 bg-gray-850 overflow-y-auto">
+        {/* ---- Left panel (resizable) ---- */}
+        <div
+          className="flex shrink-0 flex-col border-r border-gray-700 bg-gray-850 overflow-y-auto"
+          style={{ width: leftPanelWidth }}
+        >
           {/* Room info card */}
           <div className="border-b border-gray-700 p-3">
             <h3 className="mb-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
@@ -222,7 +283,32 @@ const SimulatorView: React.FC = () => {
           <div className="flex-1 overflow-y-auto p-2">
             <SeatMap />
           </div>
+
+          {/* Lobby controls */}
+          {simulatorPhase === 'lobby' && (
+            <div className="border-t border-gray-700 p-3 space-y-2">
+              <button
+                onClick={() => useSimulatorStore.getState().readyAllPlayers()}
+                className="w-full rounded bg-blue-700 px-3 py-2 text-sm text-white hover:bg-blue-600 disabled:opacity-50"
+              >
+                全部准备
+              </button>
+              <button
+                onClick={() => useSimulatorStore.getState().startGame()}
+                disabled={!judgeConnected}
+                className="w-full rounded bg-green-700 px-3 py-2 text-sm text-white hover:bg-green-600 disabled:opacity-50"
+              >
+                开始游戏
+              </button>
+            </div>
+          )}
         </div>
+
+        {/* Left panel resize handle */}
+        <div
+          className="w-1.5 cursor-ew-resize hover:bg-blue-500/40 active:bg-blue-500/60 transition-colors shrink-0"
+          onMouseDown={handleLeftDragStart}
+        />
 
         {/* ---- Right panel (flex-1) ---- */}
         <div className="flex flex-1 flex-col overflow-hidden">
@@ -251,8 +337,8 @@ const SimulatorView: React.FC = () => {
           </div>
 
           {/* Tab content */}
-          <div className="flex flex-1 flex-col overflow-hidden">
-            <div className="flex-1 overflow-auto">
+          <div className="flex flex-1 flex-col overflow-hidden min-h-0">
+            <div className="flex-1 overflow-hidden min-h-0">
               {activeTab === 'player' ? <GamePanelWrapper /> : <JudgeConsole />}
             </div>
 

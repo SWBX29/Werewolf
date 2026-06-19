@@ -46,7 +46,8 @@ const SheriffTransfer: React.FC = () => {
 
   // 确认移交
   const confirmTransfer = () => {
-    if (selectedSeat !== null) {
+    // Bug 110 修复：验证选中目标在可用列表中
+    if (selectedSeat !== null && availableSeats.includes(selectedSeat)) {
       // Bug 50 修复：先锁定状态再提交，防止快速双击重复提交
       setActionLocked(true);
       submitSheriffTransfer(selectedSeat);

@@ -36,6 +36,7 @@ export interface UseZegoVoiceReturn {
   connectionDuration: number;
   networkQuality: 'Excellent' | 'Good' | 'Medium' | 'Poor' | 'Die' | null;
   microphonePermission: 'GRANTED' | 'DENIED' | 'PROMPT';
+  operationFeedback: { type: 'mic-on' | 'mic-off' | 'speaker-on' | 'speaker-off'; timestamp: number } | null;
 
   // ---- 操作 ----
   toggleMicrophone: () => void;
@@ -60,6 +61,7 @@ export function useZegoVoice(): UseZegoVoiceReturn {
   const connectionDuration = useVoiceStore((s) => s.connectionDuration);
   const networkQuality = useVoiceStore((s) => s.networkQuality);
   const microphonePermission = useVoiceStore((s) => s.microphonePermission);
+  const operationFeedback = useVoiceStore((s) => s.operationFeedback);
 
   // store actions
   const storeToggleMicrophone = useVoiceStore((s) => s.toggleMicrophone);
@@ -70,6 +72,7 @@ export function useZegoVoice(): UseZegoVoiceReturn {
   const setVoiceError = useVoiceStore((s) => s.setVoiceError);
   const dismissVoiceError = useVoiceStore((s) => s.dismissVoiceError);
   const updateConnectionDuration = useVoiceStore((s) => s.updateConnectionDuration);
+  const setOperationFeedback = useVoiceStore((s) => s.setOperationFeedback);
 
   // 定时器引用
   const durationTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -77,48 +80,69 @@ export function useZegoVoice(): UseZegoVoiceReturn {
   // ---- 麦克风切换 ----
   const toggleMicrophone = useCallback(() => {
     const newMuted = !isMicrophoneMuted;
-    // 同步到 ZegoVoiceService
-    getZegoVoiceService().muteMicrophone(newMuted);
+    // Bug 124 修复：同步到 ZegoVoiceService（确保 SDK 状态与 store 一致）
+    const service = getZegoVoiceService();
+    service.muteMicrophone(newMuted);
     // 更新 store
     setMicrophoneMuted(newMuted);
-  }, [isMicrophoneMuted, setMicrophoneMuted]);
+    // 设置操作反馈
+    setOperationFeedback({
+      type: newMuted ? 'mic-off' : 'mic-on',
+      timestamp: Date.now(),
+    });
+  }, [isMicrophoneMuted, setMicrophoneMuted, setOperationFeedback]);
 
   // ---- 扬声器切换 ----
   const toggleSpeaker = useCallback(() => {
     const newMuted = !isSpeakerMuted;
-    // 同步到 ZegoVoiceService
-    getZegoVoiceService().muteSpeaker(newMuted);
+    // Bug 124 修复：同步到 ZegoVoiceService（确保 SDK 状态与 store 一致）
+    const service = getZegoVoiceService();
+    service.muteSpeaker(newMuted);
     // 更新 store
     setSpeakerMuted(newMuted);
-  }, [isSpeakerMuted, setSpeakerMuted]);
+    // 设置操作反馈
+    setOperationFeedback({
+      type: newMuted ? 'speaker-off' : 'speaker-on',
+      timestamp: Date.now(),
+    });
+  }, [isSpeakerMuted, setSpeakerMuted, setOperationFeedback]);
 
   // ---- 请求麦克风权限 ----
   const requestMicrophonePermission = useCallback(async (): Promise<boolean> => {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      // 获取到流说明权限已授予，立即释放流（Zego SDK 会自行创建流）
-      stream.getTracks().forEach((track) => track.stop());
-      setMicrophonePermission('GRANTED');
-      return true;
-    } catch (error) {
-      console.error('[useZegoVoice] 麦克风权限请求失败:', error);
-      setMicrophonePermission('DENIED');
-      if (error instanceof DOMException) {
-        const message = error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError'
-          ? '麦克风权限被拒绝，请在浏览器设置中允许访问麦克风'
-          : error.name === 'NotFoundError'
-            ? '未检测到麦克风设备，请连接麦克风后重试'
-            : error.name === 'NotReadableError'
-              ? '麦克风正被其他应用占用，请关闭占用程序后重试'
-              : error.name === 'SecurityError'
-                ? '当前页面不允许访问麦克风，请使用 HTTPS 或 localhost 访问'
-                : `麦克风权限请求失败：${error.message || error.name}`;
-        setVoiceError(message);
-      } else {
-        setVoiceError('麦克风权限请求失败');
+    // Bug 162 修复：麦克风权限拒绝重试逻辑
+    const MAX_RETRIES = 2;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        stream.getTracks().forEach((track) => track.stop());
+        setMicrophonePermission('GRANTED');
+        return true;
+      } catch (error) {
+        if (attempt < MAX_RETRIES && error instanceof DOMException && error.name === 'NotAllowedError') {
+          console.warn(`[useZegoVoice] 麦克风权限请求失败，第 ${attempt + 1} 次重试...`);
+          await new Promise((r) => setTimeout(r, 500));
+          continue;
+        }
+        console.error('[useZegoVoice] 麦克风权限请求失败:', error);
+        setMicrophonePermission('DENIED');
+        if (error instanceof DOMException) {
+          const message = error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError'
+            ? '麦克风权限被拒绝，请在浏览器设置中允许访问麦克风'
+            : error.name === 'NotFoundError'
+              ? '未检测到麦克风设备，请连接麦克风后重试'
+              : error.name === 'NotReadableError'
+                ? '麦克风正被其他应用占用，请关闭占用程序后重试'
+                : error.name === 'SecurityError'
+                  ? '当前页面不允许访问麦克风，请使用 HTTPS 或 localhost 访问'
+                  : `麦克风权限请求失败：${error.message || error.name}`;
+          setVoiceError(message);
+        } else {
+          setVoiceError('麦克风权限请求失败');
+        }
+        return false;
       }
-      return false;
     }
+    return false;
   }, [setMicrophonePermission, setVoiceError]);
 
   // ---- 组件挂载时自动检查麦克风权限状态 ----
@@ -126,9 +150,12 @@ export function useZegoVoice(): UseZegoVoiceReturn {
     // navigator.permissions.query 可能不被所有浏览器支持
     if (typeof navigator === 'undefined' || !navigator.permissions) return;
 
+    let permissionStatus: PermissionStatus | null = null;
+
     navigator.permissions
       .query({ name: 'microphone' as PermissionName })
       .then((status) => {
+        permissionStatus = status;
         const mapState = (state: PermissionState) => {
           switch (state) {
             case 'granted':
@@ -150,6 +177,13 @@ export function useZegoVoice(): UseZegoVoiceReturn {
       .catch(() => {
         // 某些浏览器不支持查询麦克风权限，保持默认 PROMPT 状态
       });
+
+    // Bug 163 修复：卸载时清理权限查询监听
+    return () => {
+      if (permissionStatus) {
+        permissionStatus.onchange = null;
+      }
+    };
   }, [setMicrophonePermission]);
 
   // ---- 连接时长定时器管理 ----
@@ -190,6 +224,7 @@ export function useZegoVoice(): UseZegoVoiceReturn {
     connectionDuration,
     networkQuality,
     microphonePermission,
+    operationFeedback,
 
     // 操作
     toggleMicrophone,

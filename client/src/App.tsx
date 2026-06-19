@@ -173,25 +173,32 @@ const App: React.FC = () => {
 
   // 首屏渲染完成后，隐藏骨架屏并预加载剩余 chunk
   useEffect(() => {
+    // Bug 91-92 修复：保存定时器引用以便清理
+    let skeletonTimer: ReturnType<typeof setTimeout> | null = null;
+    let transitionTimer: ReturnType<typeof setTimeout> | null = null;
+
     // 延迟隐藏骨架屏，确保首屏内容已渲染
     const hideSkeleton = () => {
       const skeleton = document.getElementById('skeleton');
       if (skeleton) {
         skeleton.classList.add('skeleton-hidden');
         // 等待过渡动画完成后移除骨架屏
-        setTimeout(() => {
+        transitionTimer = setTimeout(() => {
           setSkeletonVisible(false);
         }, 300);
       }
     };
 
     // 首屏渲染完成后隐藏骨架屏
-    const timer = setTimeout(hideSkeleton, 100);
+    skeletonTimer = setTimeout(hideSkeleton, 100);
 
     // 触发预加载
     prefetchChunks();
 
-    return () => clearTimeout(timer);
+    return () => {
+      if (skeletonTimer) clearTimeout(skeletonTimer);
+      if (transitionTimer) clearTimeout(transitionTimer);
+    };
   }, []);
 
   // Zego 语音服务：延迟到进入游戏时才初始化，避免首屏加载 1.9MB SDK
@@ -288,12 +295,20 @@ const App: React.FC = () => {
   }, [currentView, roomCode, playerId, nickname, roomDissolvedData, enableVoice]);
 
   // 错误弹窗自动关闭（5秒后）
+  // Bug 91-92 修复：保存定时器引用以便清理
+  const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (error) {
-      const timer = setTimeout(() => {
+      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+      errorTimerRef.current = setTimeout(() => {
         dismissError();
       }, 5000);
-      return () => clearTimeout(timer);
+      return () => {
+        if (errorTimerRef.current) {
+          clearTimeout(errorTimerRef.current);
+          errorTimerRef.current = null;
+        }
+      };
     }
   }, [error, dismissError]);
 
@@ -325,8 +340,8 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* 游戏中断连重连弹窗 */}
-      {currentView === 'game' && !isConnected && (
+      {/* 游戏中断连重连弹窗 — Bug 94 修复：断连时始终显示，isReconnecting 时显示重连中状态 */}
+      {currentView === 'game' && !isConnected && !isReconnecting && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm">
           <div className="card max-w-sm w-full mx-4 text-center space-y-4 animate-fade-in-up">
             <div className="text-4xl">🔌</div>

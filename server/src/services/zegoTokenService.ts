@@ -46,21 +46,22 @@ function generateToken04(
   effectiveTimeInSeconds: number,
   payload?: string,
 ): string {
-  const secretBuffer = Buffer.isBuffer(secret) ? secret : Buffer.from(secret, 'utf8');
-
-  if (!appId || typeof appId !== 'number') {
+  // Bug 127 修复：严格校验所有参数
+  if (!appId || typeof appId !== 'number' || !Number.isFinite(appId) || appId <= 0) {
     throw createError(ErrorCode.appIDInvalid, 'appID invalid');
   }
 
-  if (!userId || typeof userId !== 'string' || userId.length > 64) {
+  if (!userId || typeof userId !== 'string' || userId.trim().length === 0 || userId.length > 64) {
     throw createError(ErrorCode.userIDInvalid, 'userId invalid');
   }
+
+  const secretBuffer = Buffer.isBuffer(secret) ? secret : Buffer.from(secret, 'utf8');
 
   if (secretBuffer.length !== 32) {
     throw createError(ErrorCode.secretInvalid, 'secret must be a 32 byte string');
   }
 
-  if (!(effectiveTimeInSeconds > 0)) {
+  if (typeof effectiveTimeInSeconds !== 'number' || !Number.isFinite(effectiveTimeInSeconds) || !(effectiveTimeInSeconds > 0)) {
     throw createError(ErrorCode.effectiveTimeInSecondsInvalid, 'effectiveTimeInSeconds invalid');
   }
 
@@ -107,6 +108,10 @@ class ZegoTokenService {
   private readonly appId: number;
   private readonly secret: Buffer;
 
+  // Bug 157 修复：Token 请求去重缓存（userId -> { promise, timestamp }）
+  private _pendingRequests: Map<string, { promise: Promise<string>; timestamp: number }> = new Map();
+  private static readonly REQUEST_TTL_MS = 5000;
+
   constructor() {
     const appIdStr = process.env.ZEGO_APP_ID;
     const serverSecret = process.env.ZEGO_SERVER_SECRET;
@@ -146,6 +151,36 @@ class ZegoTokenService {
    */
   generateToken(userId: string): string {
     return generateToken04(this.appId, userId, this.secret, TOKEN_EFFECTIVE_TIME);
+  }
+
+  /**
+   * 生成 Zego Token（带去重和超时保护）
+   * @param userId 用户 ID
+   * @returns Token 字符串的 Promise
+   */
+  async generateTokenAsync(userId: string): Promise<string> {
+    // Bug 157 修复：清理过期缓存
+    const now = Date.now();
+    for (const [key, entry] of this._pendingRequests) {
+      if (now - entry.timestamp > ZegoTokenService.REQUEST_TTL_MS) {
+        this._pendingRequests.delete(key);
+      }
+    }
+
+    // 去重：如果同一 userId 的请求正在进行中，复用 Promise
+    const pending = this._pendingRequests.get(userId);
+    if (pending) {
+      return pending.promise;
+    }
+
+    const promise = Promise.resolve().then(() => {
+      const token = this.generateToken(userId);
+      this._pendingRequests.delete(userId);
+      return token;
+    });
+
+    this._pendingRequests.set(userId, { promise, timestamp: now });
+    return promise;
   }
 
   /**
