@@ -79,9 +79,6 @@ export class TimerManager {
 
     this.deadlines.set(config.name, deadline);
     this.callbacks.set(config.name, config.onTimeout);
-    if (config.onTick) {
-      this.onTickCallbacks.set(config.name, config.onTick);
-    }
 
     const timer = setTimeout(() => {
       this.executeTimeout(config.name);
@@ -89,6 +86,8 @@ export class TimerManager {
     this.timers.set(config.name, timer);
 
     if (config.onTick) {
+      this.onTickCallbacks.set(config.name, config.onTick);
+
       let remaining = config.duration;
       const tickTimer = setInterval(() => {
         remaining--;

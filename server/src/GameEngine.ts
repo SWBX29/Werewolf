@@ -1778,23 +1778,19 @@ export class GameEngine {
   private resolveSheriffElection(): void {
     const votes = this.state.sheriffElectionVotes;
 
-    // 统计票数
+    // 统计票数并找最高票
+    let maxVotes = 0;
+    let winners: number[] = [];
     const voteCount: Record<number, number> = {};
     for (const [, target] of Object.entries(votes)) {
       if (target !== null && target !== -1) {
-        voteCount[target] = (voteCount[target] || 0) + 1;
-      }
-    }
-
-    // 找最高票
-    let maxVotes = 0;
-    let winners: number[] = [];
-    for (const [seat, count] of Object.entries(voteCount)) {
-      if (count > maxVotes) {
-        maxVotes = count;
-        winners = [Number(seat)];
-      } else if (count === maxVotes) {
-        winners.push(Number(seat));
+        const count = (voteCount[target] = (voteCount[target] || 0) + 1);
+        if (count > maxVotes) {
+          maxVotes = count;
+          winners = [target];
+        } else if (count === maxVotes) {
+          winners.push(target);
+        }
       }
     }
 
@@ -1884,23 +1880,19 @@ export class GameEngine {
   private resolveSheriffElectionPK(candidates: number[]): void {
     const votes = this.state.sheriffElectionVotes;
 
-    // 统计票数
+    // 统计票数并找最高票
+    let maxVotes = 0;
+    let winners: number[] = [];
     const voteCount: Record<number, number> = {};
     for (const [, target] of Object.entries(votes)) {
       if (target !== null && target !== -1 && candidates.includes(target)) {
-        voteCount[target] = (voteCount[target] || 0) + 1;
-      }
-    }
-
-    // 找最高票
-    let maxVotes = 0;
-    let winners: number[] = [];
-    for (const [seat, count] of Object.entries(voteCount)) {
-      if (count > maxVotes) {
-        maxVotes = count;
-        winners = [Number(seat)];
-      } else if (count === maxVotes) {
-        winners.push(Number(seat));
+        const count = (voteCount[target] = (voteCount[target] || 0) + 1);
+        if (count > maxVotes) {
+          maxVotes = count;
+          winners = [target];
+        } else if (count === maxVotes) {
+          winners.push(target);
+        }
       }
     }
 
@@ -2327,26 +2319,22 @@ export class GameEngine {
   private resolveDayVote(): void {
     const config = this.state.config;
 
-    // 统计票数（警长按权重计票）
+    // 统计票数并找出最高票（警长按权重计票）
+    let maxVotes = 0;
+    let candidates: number[] = [];
     const voteCount: Record<number, number> = {};
     for (const [voter, target] of Object.entries(this.state.votes)) {
       const targetSeat = Number(target);
       if (targetSeat !== -1) {
         const voterPlayer = this.getPlayerBySeat(Number(voter));
         const weight = voterPlayer?.isSheriff ? this.state.config.sheriffVoteWeight : 1;
-        voteCount[targetSeat] = (voteCount[targetSeat] || 0) + weight;
-      }
-    }
-
-    // 找出最高票
-    let maxVotes = 0;
-    let candidates: number[] = [];
-    for (const [seat, count] of Object.entries(voteCount)) {
-      if (count > maxVotes) {
-        maxVotes = count;
-        candidates = [Number(seat)];
-      } else if (count === maxVotes) {
-        candidates.push(Number(seat));
+        const count = (voteCount[targetSeat] = (voteCount[targetSeat] || 0) + weight);
+        if (count > maxVotes) {
+          maxVotes = count;
+          candidates = [targetSeat];
+        } else if (count === maxVotes) {
+          candidates.push(targetSeat);
+        }
       }
     }
 
@@ -2418,26 +2406,22 @@ export class GameEngine {
   private resolvePKVote(): void {
     const pkCandidates = this.state.pkCandidates;
 
-    // 统计票数（警长按权重计票）
+    // 统计票数并找出最高票（警长按权重计票）
+    let maxVotes = 0;
+    let winners: number[] = [];
     const voteCount: Record<number, number> = {};
     for (const [voter, target] of Object.entries(this.state.votes)) {
       const targetSeat = Number(target);
       if (targetSeat !== -1 && pkCandidates.includes(targetSeat)) {
         const voterPlayer = this.getPlayerBySeat(Number(voter));
         const weight = voterPlayer?.isSheriff ? this.state.config.sheriffVoteWeight : 1;
-        voteCount[targetSeat] = (voteCount[targetSeat] || 0) + weight;
-      }
-    }
-
-    // 找出最高票
-    let maxVotes = 0;
-    let winners: number[] = [];
-    for (const [seat, count] of Object.entries(voteCount)) {
-      if (count > maxVotes) {
-        maxVotes = count;
-        winners = [Number(seat)];
-      } else if (count === maxVotes) {
-        winners.push(Number(seat));
+        const count = (voteCount[targetSeat] = (voteCount[targetSeat] || 0) + weight);
+        if (count > maxVotes) {
+          maxVotes = count;
+          winners = [targetSeat];
+        } else if (count === maxVotes) {
+          winners.push(targetSeat);
+        }
       }
     }
 
@@ -3717,23 +3701,17 @@ export class GameEngine {
         if (this.state.nightSubPhase) {
           const currentRole = this.state.nightSubPhase.currentRole;
           // 调用对应角色的超时处理器以提交当前动作（超时处理器内部会调用 advanceNightSubPhase）
-          if (currentRole === 'werewolf') {
-            this.handleWolfVoteTimeout();
-            return { success: true };
-          } else if (currentRole === 'guard') {
-            this.handleGuardTimeout();
-            return { success: true };
-          } else if (currentRole === 'witch') {
-            this.handleWitchTimeout();
-            return { success: true };
-          } else if (currentRole === 'seer') {
-            this.handleSeerTimeout();
-            return { success: true };
-          } else if (currentRole === 'nightmare_shadow') {
-            this.handleNightmareTimeout();
-            return { success: true };
-          } else if (currentRole === 'mechanical_wolf') {
-            this.handleMechanicalWolfTimeout();
+          const timeoutHandlers: Partial<Record<RoleId, () => void>> = {
+            werewolf: () => this.handleWolfVoteTimeout(),
+            guard: () => this.handleGuardTimeout(),
+            witch: () => this.handleWitchTimeout(),
+            seer: () => this.handleSeerTimeout(),
+            nightmare_shadow: () => this.handleNightmareTimeout(),
+            mechanical_wolf: () => this.handleMechanicalWolfTimeout(),
+          };
+          const handler = timeoutHandlers[currentRole];
+          if (handler) {
+            handler();
             return { success: true };
           } else {
             // 其他角色：直接推进到下一个子阶段
@@ -4141,20 +4119,12 @@ export class GameEngine {
     }
 
     switch (config.speechOrderStrategy) {
-      case 'DEATH_LEFT': {
-        // 从上一个死亡者的左手边开始
-        const lastDead = this.findLastDeadPlayer();
-        if (lastDead) {
-          this.state.speechOrder = this.buildOrderFromSeat(alivePlayers, lastDead.seatNumber, 'left');
-        } else {
-          this.state.speechOrder = alivePlayers.map((p) => p.seatNumber);
-        }
-        break;
-      }
+      case 'DEATH_LEFT':
       case 'DEATH_RIGHT': {
         const lastDead = this.findLastDeadPlayer();
         if (lastDead) {
-          this.state.speechOrder = this.buildOrderFromSeat(alivePlayers, lastDead.seatNumber, 'right');
+          const direction = config.speechOrderStrategy === 'DEATH_LEFT' ? 'left' : 'right';
+          this.state.speechOrder = this.buildOrderFromSeat(alivePlayers, lastDead.seatNumber, direction);
         } else {
           this.state.speechOrder = alivePlayers.map((p) => p.seatNumber);
         }
@@ -4203,14 +4173,13 @@ export class GameEngine {
     const startIndex = seats.findIndex((s) => s === startSeat);
     // 如果起始座位不在存活列表中（已死亡），从最近的下一个座位开始
     const effectiveStartIndex = startIndex >= 0 ? startIndex : 0;
-    const offset = direction === 'left' ? 1 : -1;
-
-    const order: number[] = [];
-    for (let i = 1; i <= seats.length; i++) {
-      const idx = ((effectiveStartIndex + offset * i) % seats.length + seats.length) % seats.length;
-      order.push(seats[idx]);
+    if (direction === 'left') {
+      // 左手边：从 effectiveStartIndex + 1 开始，绕回
+      return [...seats.slice(effectiveStartIndex + 1), ...seats.slice(0, effectiveStartIndex + 1)];
+    } else {
+      // 右手边：从 effectiveStartIndex - 1 开始，绕回（逆序）
+      return [...seats.slice(0, effectiveStartIndex).reverse(), ...seats.slice(effectiveStartIndex).reverse()];
     }
-    return order;
   }
 
   // ==========================================================================

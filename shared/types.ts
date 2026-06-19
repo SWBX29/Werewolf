@@ -198,9 +198,9 @@ export function isImitationFailRole(roleId: RoleId): boolean {
  * 判断角色是否为神职角色
  * 神职角色：预言家、女巫、猎人、守卫、白痴、骑士
  */
+const GOD_ROLES: RoleId[] = ['seer', 'witch', 'hunter', 'guard', 'idiot', 'knight'];
 export function isGodRole(roleId: RoleId): boolean {
-  const godRoles: RoleId[] = ['seer', 'witch', 'hunter', 'guard', 'idiot', 'knight'];
-  return godRoles.includes(roleId);
+  return GOD_ROLES.includes(roleId);
 }
 
 /**

@@ -1035,10 +1035,7 @@ export class LobbyManager {
     }
 
     // 校验角色分配总数
-    let totalRoles = 0;
-    for (const count of Object.values(state.config.roleDistribution)) {
-      totalRoles += count || 0;
-    }
+    const totalRoles = Object.values(state.config.roleDistribution).reduce((sum, count) => sum + (count || 0), 0);
     if (totalRoles !== nonJudgePlayers.length) {
       return { canStart: false, error: `角色分配总数(${totalRoles})与玩家数(${nonJudgePlayers.length})不匹配` };
     }

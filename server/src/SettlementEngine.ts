@@ -54,21 +54,17 @@ export function checkWinCondition(
   // 阵营分类：
   // - 隐狼始终属于狼人阵营（被预言家查验为好人只是显示效果）
   // - 机械狼始终属于狼人阵营（无论模仿什么角色）
-  const aliveGood = alivePlayers.filter((p) => {
-    // 隐狼和机械狼始终不计入好人阵营
+  const aliveGood: Player[] = [];
+  const aliveEvil: Player[] = [];
+  for (const p of alivePlayers) {
     if (p.role === 'hidden_wolf' || p.role === 'mechanical_wolf') {
-      return false;
+      aliveEvil.push(p);
+    } else if (isEvilRole(p.role)) {
+      aliveEvil.push(p);
+    } else {
+      aliveGood.push(p);
     }
-    return !isEvilRole(p.role);
-  });
-
-  const aliveEvil = alivePlayers.filter((p) => {
-    // 隐狼和机械狼始终计入狼人阵营
-    if (p.role === 'hidden_wolf' || p.role === 'mechanical_wolf') {
-      return true;
-    }
-    return isEvilRole(p.role);
-  });
+  }
 
   // 1. 狼人全灭 → 好人获胜
   if (aliveEvil.length === 0) {
@@ -137,12 +133,12 @@ export function resolveDeathChain(
     hasChain: false,
   };
 
+  // 判断是否被毒杀封印技能
+  const isPoisonBlocked = deadPlayer.deathCause === 'witch_poison' && poisonBlockGun;
+
   // 猎人死亡 → 可开枪（如果尚未开枪，且非被毒杀封印，且死因允许开枪）
   if (deadPlayer.role === 'hunter' && !deadPlayer.hunterGunFired) {
-    const isPoisoned = deadPlayer.deathCause === 'witch_poison';
-    const poisonBlocked = isPoisoned && poisonBlockGun;
-    const causeAllowed = isHunterShootCauseAllowed(deadPlayer.deathCause, hunterDeathShootCauses);
-    if (!poisonBlocked && causeAllowed) {
+    if (!isPoisonBlocked && isHunterShootCauseAllowed(deadPlayer.deathCause, hunterDeathShootCauses)) {
       result.hasChain = true;
       result.chainTrigger = deadPlayer;
     }
@@ -150,8 +146,7 @@ export function resolveDeathChain(
 
   // 狼王死亡 → 可开枪（如果尚未开枪，且非被毒杀封印）
   if (deadPlayer.role === 'wolf_king' && !deadPlayer.wolfKingGunFired) {
-    const isPoisoned = deadPlayer.deathCause === 'witch_poison';
-    if (!(isPoisoned && poisonBlockGun)) {
+    if (!isPoisonBlocked) {
       result.hasChain = true;
       result.chainTrigger = deadPlayer;
     }
@@ -331,20 +326,13 @@ export function resolveVoteResult(
   const maxVoteSeats = targets.filter((t) => voteCounts[t] === maxVotes);
 
   // 多人同票 → 进入 PK
-  if (maxVoteSeats.length > 1) {
-    return {
-      voteCounts,
-      maxVoteSeat: null,
-      needPK: true,
-      pkCandidates: maxVoteSeats,
-    };
-  }
+  const needPK = maxVoteSeats.length > 1;
 
   return {
     voteCounts,
-    maxVoteSeat: maxVoteSeats[0],
-    needPK: false,
-    pkCandidates: [],
+    maxVoteSeat: needPK ? null : maxVoteSeats[0],
+    needPK,
+    pkCandidates: needPK ? maxVoteSeats : [],
   };
 }
 
