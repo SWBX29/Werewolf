@@ -1,8 +1,26 @@
+/**
+ * ============================================================================
+ * SpectatorMode — 观战模式组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 死亡玩家进入观战模式，可查看场上发言回放
+ *   2. 根据死亡经过的夜晚数逐步揭示玩家身份信息
+ *   3. 集成亡灵聊天功能
+ *
+ * 设计原则：
+ *   - 死亡1夜后可感知狼人行动，2夜后揭示全部身份
+ *   - 发言回放自动滚动到最新消息
+ *   - 亡灵聊天仅亡灵可见
+ * ============================================================================
+ */
+
 import React, { useEffect, useRef } from 'react';
 import { useGameStore } from '../../useGameStore';
 import { ROLE_META } from '@langrensha/shared';
 import DeadChat from './DeadChat';
 
+/** 观战模式组件，死亡玩家可查看场上发言和逐步揭示的身份信息 */
 const SpectatorMode: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
   const speechMessages = useGameStore((s) => s.speechMessages);

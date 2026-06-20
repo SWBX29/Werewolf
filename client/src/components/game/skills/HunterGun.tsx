@@ -1,3 +1,20 @@
+/**
+ * ============================================================================
+ * HunterGun — 猎人开枪技能组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 猎人死亡后触发的开枪技能面板，允许猎人选择带走一名玩家或放弃开枪
+ *   2. 根据村规配置判断猎人是否可在特定死因下开枪
+ *   3. 提供目标选择、确认弹窗和倒计时功能
+ *
+ * 设计原则：
+ *   - 死因可配置：通过 ruleConfig.hunterDeathShootCauses 控制允许开枪的死因
+ *   - 一次性操作：开枪后设置 gunFired 标记，防止重复操作
+ *   - 安全确认：开枪前弹出确认对话框，避免误操作
+ * ============================================================================
+ */
+
 import React, { useState } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import type { DeathCause, HunterDeathShootCause } from '@langrensha/shared';
@@ -6,6 +23,12 @@ import TargetSelector from '../TargetSelector';
 import CountdownTimer from '../CountdownTimer';
 import ConfirmDialog from '../ConfirmDialog';
 
+/**
+ * 猎人开枪技能组件
+ *
+ * 当猎人玩家死亡时渲染开枪操作面板，支持选择目标玩家开枪或放弃开枪。
+ * 根据村规配置判断当前死因是否允许开枪，不允许时显示提示信息。
+ */
 const HunterGun: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
   const ruleConfig = useGameStore((s) => s.ruleConfig);
@@ -27,16 +50,15 @@ const HunterGun: React.FC = () => {
   // 已开枪则不再显示
   if (gunFired) return null;
 
-  // 猎人死亡可开枪检查：根据 hunterDeathShootCauses 配置判断
-  // 可配置的死因：witch_poison / werewolf_kill / vote_out
-  // 其他死因默认允许开枪
+  // ============ 死因开枪权限检查 ============
+
+  // 根据村规配置判断当前死因是否允许开枪
   const deathCause = myPlayer.deathCause;
   const configurableCauses: DeathCause[] = ['witch_poison', 'werewolf_kill', 'vote_out'];
   const isConfigurable = deathCause ? configurableCauses.includes(deathCause) : false;
   const canShoot = !isConfigurable || (deathCause !== null && ruleConfig.hunterDeathShootCauses.includes(deathCause as HunterDeathShootCause));
 
   if (!canShoot) {
-    // 找到被禁止的死因中文名
     const blockedCauseName = deathCause ? HUNTER_DEATH_SHOOT_CAUSE_NAMES[deathCause as HunterDeathShootCause] ?? '当前死因' : '当前死因';
     return (
       <div className="skill-panel p-4 space-y-3">
@@ -49,33 +71,28 @@ const HunterGun: React.FC = () => {
     );
   }
 
-  // 夜间行动请求（如果有）
-  const nightActionRequest = playerState.nightActionRequest;
+  // ============ 超时与目标计算 ============
+
+  // 从 pendingDeathSkill 获取技能操作超时时间
+  const pendingSkill = playerState.pendingDeathSkill;
+  const skillTimeout = pendingSkill?.type === 'hunter_gun' ? pendingSkill.timeout : 0;
 
   const { players } = playerState;
 
   // 可开枪目标：所有存活玩家（排除自己）
-  // 如果有 nightActionRequest 则使用其可用目标列表
-  const gunTargets = nightActionRequest?.roleId === 'hunter'
-    ? nightActionRequest.availableTargets
-    : players
-        .filter((p) => !p.isJudge && p.status === 'alive' && p.seatNumber !== myPlayer.seatNumber)
-        .map((p) => p.seatNumber);
+  const gunTargets = players
+    .filter((p) => !p.isJudge && p.status === 'alive' && p.seatNumber !== myPlayer.seatNumber)
+    .map((p) => p.seatNumber);
 
-  // 被禁用的目标（如果有 nightActionRequest）
-  const disabledTargets = nightActionRequest?.roleId === 'hunter'
-    ? nightActionRequest.disabledTargets
-    : [];
-
-  const disabledReasons = nightActionRequest?.roleId === 'hunter'
-    ? nightActionRequest.disabledReasons
-    : {};
-
+  /** 根据座位号获取玩家昵称 */
   const getPlayerName = (seat: number) => {
     const p = players.find((pl) => pl.seatNumber === seat);
     return p?.nickname ?? '';
   };
 
+  // ============ 操作处理 ============
+
+  /** 确认开枪：向服务端发送开枪请求并更新本地状态 */
   const handleConfirm = () => {
     if (selectedSeat === null || gunFired) return;
     hunterGun(selectedSeat);
@@ -83,20 +100,23 @@ const HunterGun: React.FC = () => {
     setGunFired(true);
   };
 
+  /** 放弃开枪：传入 -1 表示不开枪 */
   const handleSkipGun = () => {
     if (gunFired) return;
     hunterGun(-1);
     setGunFired(true);
   };
 
+  // ============ 渲染 ============
+
   return (
     <div className="skill-panel p-4 space-y-3">
       <h3 className="text-lg font-bold text-red-400">🔫 猎人开枪</h3>
       <p className="text-sm text-gray-400">你已死亡，可以选择开枪带走一名玩家</p>
 
-      {/* 倒计时（仅在有 nightActionRequest 时显示） */}
-      {nightActionRequest?.roleId === 'hunter' && nightActionRequest.timeout > 0 && (
-        <CountdownTimer seconds={nightActionRequest.timeout} />
+      {/* 倒计时 */}
+      {skillTimeout > 0 && (
+        <CountdownTimer seconds={skillTimeout} />
       )}
 
       <TargetSelector
@@ -105,8 +125,8 @@ const HunterGun: React.FC = () => {
         mySeat={myPlayer.seatNumber}
         selected={selectedSeat}
         onSelect={setSelectedSeat}
-        disabledTargets={disabledTargets}
-        disabledReasons={disabledReasons}
+        disabledTargets={[]}
+        disabledReasons={{}}
       />
 
       <div className="flex gap-2">

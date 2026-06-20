@@ -1,6 +1,23 @@
+/**
+ * ============================================================================
+ * DeadChat — 亡灵聊天组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 仅亡灵玩家可见的私密聊天区域
+ *   2. 支持实时发送和接收消息
+ *
+ * 设计原则：
+ *   - 只有死亡状态才渲染
+ *   - 消息自动滚动到底部
+ *   - 区分自己和他人的消息样式
+ * ============================================================================
+ */
+
 import React, { useEffect, useRef, useState } from 'react';
 import { useGameStore } from '../../useGameStore';
 
+/** 亡灵聊天组件，仅亡灵玩家可见的私密聊天区域 */
 const DeadChat: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
   const deadChatMessages = useGameStore((s) => s.deadChatMessages);

@@ -1,3 +1,20 @@
+/**
+ * ============================================================================
+ * SimulatorView — 狼人杀游戏模拟器主视图
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 管理 Setup / Lobby / Playing / GameOver 四个模拟器阶段
+ *   2. 左侧面板：房间信息 + 座位图 + 大厅控制（可拖拽调整宽度）
+ *   3. 右侧面板：玩家操作 / 法官控制 Tab 切换 + 自动策略折叠面板
+ *   4. 底部：可折叠事件日志
+ *
+ * 设计原则：
+ *   - 通过 storeInjector 将模拟器状态注入 useGameStore，复用现有游戏组件
+ *   - 组件卸载时自动断开所有模拟器连接
+ * ============================================================================
+ */
+
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useSimulatorStore } from './simulator/useSimulatorStore';
 import { injectStateToGameStore } from './simulator/storeInjector';
@@ -20,9 +37,7 @@ const AUTO_MODE_OPTIONS = [
   { value: 'auto', label: '自动执行' },
 ] as const;
 
-// ============================================================================
-// SimulatorView 主组件
-// ============================================================================
+/** 狼人杀游戏模拟器主视图，集成座位图、玩家操作、法官控制和事件日志 */
 
 const SimulatorView: React.FC = () => {
   // ---- Simulator store ----
@@ -121,7 +136,7 @@ const SimulatorView: React.FC = () => {
     };
   }, [disconnectAll]);
 
-  // ---- Sync simulator state to useGameStore ----
+  // ---- 同步模拟器状态到 useGameStore ----
   const playerStates = useSimulatorStore((s) => s.playerStates);
   const judgeState = useSimulatorStore((s) => s.judgeState);
 
@@ -144,11 +159,11 @@ const SimulatorView: React.FC = () => {
     }
   }, [selectedPlayerId, playerStates, judgeState, connections]);
 
-  // ---- Setup 阶段：显示 RoomSetupPanel ----
+  // ---- Setup 阶段：显示房间配置面板 ----
   if (simulatorPhase === 'setup') {
     return (
       <div className="flex h-full flex-col bg-gray-900 text-white">
-        {/* Toolbar */}
+        {/* 工具栏 */}
         <div className="flex items-center gap-3 border-b border-gray-700 bg-gray-800 px-4 py-2">
           <button
             onClick={handleBack}
@@ -169,7 +184,7 @@ const SimulatorView: React.FC = () => {
           </div>
         </div>
 
-        {/* Setup panel */}
+        {/* 配置面板 */}
         <div className="flex flex-1 items-start justify-center overflow-auto p-6">
           <RoomSetupPanel />
         </div>
@@ -180,7 +195,7 @@ const SimulatorView: React.FC = () => {
   // ---- 游戏/大厅阶段 ----
   return (
     <div className="flex h-full flex-col bg-gray-900 text-white">
-      {/* ===== Toolbar ===== */}
+      {/* ===== 工具栏 ===== */}
       <div className="flex flex-wrap items-center gap-3 border-b border-gray-700 bg-gray-800 px-4 py-2">
         <button
           onClick={handleBack}
@@ -236,7 +251,7 @@ const SimulatorView: React.FC = () => {
         </button>
       </div>
 
-      {/* ===== Error banner ===== */}
+      {/* ===== 错误提示条 ===== */}
       {error && (
         <div className="flex items-center gap-2 bg-red-900/60 px-4 py-1.5 text-xs text-red-200">
           <span className="flex-1">{error}</span>
@@ -249,14 +264,14 @@ const SimulatorView: React.FC = () => {
         </div>
       )}
 
-      {/* ===== Main content ===== */}
+      {/* ===== 主内容区 ===== */}
       <div className="flex flex-1 overflow-hidden">
-        {/* ---- Left panel (resizable) ---- */}
+        {/* ---- 左侧面板（可调整宽度） ---- */}
         <div
           className="flex shrink-0 flex-col border-r border-gray-700 bg-gray-850 overflow-y-auto"
           style={{ width: leftPanelWidth }}
         >
-          {/* Room info card */}
+          {/* 房间信息卡片 */}
           <div className="border-b border-gray-700 p-3">
             <h3 className="mb-2 text-xs font-semibold text-gray-400 uppercase tracking-wider">
               房间信息
@@ -279,12 +294,12 @@ const SimulatorView: React.FC = () => {
             </div>
           </div>
 
-          {/* SeatMap */}
+          {/* 座位图 */}
           <div className="flex-1 overflow-y-auto p-2">
             <SeatMap />
           </div>
 
-          {/* Lobby controls */}
+          {/* 大厅控制按钮 */}
           {simulatorPhase === 'lobby' && (
             <div className="border-t border-gray-700 p-3 space-y-2">
               <button
@@ -304,15 +319,15 @@ const SimulatorView: React.FC = () => {
           )}
         </div>
 
-        {/* Left panel resize handle */}
+        {/* 左侧面板拖拽调整宽度手柄 */}
         <div
           className="w-1.5 cursor-ew-resize hover:bg-blue-500/40 active:bg-blue-500/60 transition-colors shrink-0"
           onMouseDown={handleLeftDragStart}
         />
 
-        {/* ---- Right panel (flex-1) ---- */}
+        {/* ---- 右侧面板（自适应宽度） ---- */}
         <div className="flex flex-1 flex-col overflow-hidden">
-          {/* Tab bar */}
+          {/* 标签栏 */}
           <div className="flex border-b border-gray-700 bg-gray-800">
             <button
               onClick={() => handleTabChange('player')}
@@ -336,13 +351,13 @@ const SimulatorView: React.FC = () => {
             </button>
           </div>
 
-          {/* Tab content */}
+          {/* 标签内容 */}
           <div className="flex flex-1 flex-col overflow-hidden min-h-0">
             <div className="flex-1 overflow-hidden min-h-0">
               {activeTab === 'player' ? <GamePanelWrapper /> : <JudgeConsole />}
             </div>
 
-            {/* AutoStrategyPanel - collapsible */}
+            {/* 自动策略面板 - 可折叠 */}
             <div className="border-t border-gray-700">
               <button
                 onClick={() => setStrategyCollapsed((v) => !v)}
@@ -370,7 +385,7 @@ const SimulatorView: React.FC = () => {
         </div>
       </div>
 
-      {/* ===== EventLog (bottom, collapsible) ===== */}
+      {/* ===== 事件日志（底部，可折叠） ===== */}
       <EventLog />
     </div>
   );

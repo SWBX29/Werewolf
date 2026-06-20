@@ -1,9 +1,26 @@
+/**
+ * ============================================================================
+ * SheriffElection — 警长选举组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 提供警长选举投票界面，候选人列表自动排除法官和现任警长
+ *   2. 支持投票和弃权两种操作，均需二次确认
+ *   3. 提交后锁定操作，防止重复投票
+ *
+ * 设计原则：
+ *   - 候选人过滤：仅存活、非法官、非现任警长的玩家可选
+ *   - 操作锁定：确认投票时先锁定状态再提交，避免快速双击重复提交
+ *   - 选举结果由 GameView 顶部横幅统一展示，本组件仅控制投票 UI
+ * ============================================================================
+ */
+
 import React, { useState, useMemo } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import TargetSelector from '../TargetSelector';
 import CountdownTimer from '../CountdownTimer';
 
-/** 选举警长界面组件 */
+/** 警长选举界面组件 — 展示候选人列表，支持投票、弃权操作及二次确认 */
 const SheriffElection: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
   const isActionLocked = useGameStore((s) => s.isActionLocked);
@@ -15,9 +32,8 @@ const SheriffElection: React.FC = () => {
   const [selectedSeat, setSelectedSeat] = useState<number | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
   const [confirmTarget, setConfirmTarget] = useState<number | null>(null);
-  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Bug 56 修复：候选人需排除法官（防御性编程）
+  // 候选人列表：仅存活、非现任警长、非法官的玩家
   const candidates = useMemo(
     () =>
       playerState?.players.filter(
@@ -33,35 +49,36 @@ const SheriffElection: React.FC = () => {
 
   const candidateSeats = candidates.map((p) => p.seatNumber);
 
+  /** 根据座位号获取玩家昵称 */
   const getPlayerName = (seat: number) => {
     const p = playerState!.players.find((pl) => pl.seatNumber === seat);
     return p?.nickname ?? '';
   };
 
-  // 投票
+  // ============ 投票操作 ============
+
+  /** 点击投票按钮，弹出确认对话框 */
   const handleVote = () => {
     if (isActionLocked) return;
     setConfirmTarget(selectedSeat);
     setShowConfirm(true);
   };
 
-  // 弃权
+  /** 点击弃权按钮，弹出确认对话框 */
   const handleAbstain = () => {
     if (isActionLocked) return;
     setConfirmTarget(null);
     setShowConfirm(true);
   };
 
-  // 确认投票
+  /** 确认投票：先锁定操作状态再提交，防止重复提交 */
   const confirmVote = () => {
-    if (isActionLocked || isSubmitting) return;
-    setIsSubmitting(true);
     setActionLocked(true);
     submitSheriffElectionVote(confirmTarget);
     setShowConfirm(false);
   };
 
-  // 取消确认
+  /** 取消确认对话框 */
   const cancelConfirm = () => {
     setShowConfirm(false);
     setConfirmTarget(null);

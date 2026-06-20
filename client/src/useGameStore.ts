@@ -1,18 +1,16 @@
 /**
  * ============================================================================
- * 狼人杀联机游戏 — Zustand 全局状态仓库
+ * useGameStore — Zustand 全局状态仓库
  * ============================================================================
  *
  * 架构说明：
- *   本文件是前端的单一状态源（Single Source of Truth），负责：
- *   1. WebSocket 连接管理
- *   2. 服务端消息的接收与状态同步
- *   3. 客户端消息的发送
- *   4. 视图路由状态管理
+ *   1. 作为前端的单一状态源（Single Source of Truth），管理所有游戏状态
+ *   2. 负责 WebSocket 连接管理、消息收发与状态同步
+ *   3. 视图路由状态管理，控制页面切换
  *
  * 设计原则：
  *   - 所有游戏状态均来自服务端推送，前端不做任何自主计算
- *   - WebSocket 断线自动重连
+ *   - WebSocket 断线自动重连，采用竞速连接策略加速建连
  *   - 状态更新粒度最小化，避免不必要的重渲染
  * ============================================================================
  */
@@ -55,12 +53,14 @@ import { useVoiceStore } from './store/useVoiceStore';
 // 视图路由状态
 // ============================================================================
 
+/** 视图路由类型 */
 export type ViewType = 'home' | 'game' | 'admin' | 'simulator';
 
 // ============================================================================
 // Store 状态接口
 // ============================================================================
 
+/** 游戏全局状态接口 */
 interface GameState {
   // ---- 连接状态 ----
   ws: WebSocket | null;
@@ -179,6 +179,8 @@ interface GameState {
   sendMessage: (message: ClientMessage) => void;
   /** 消息拦截器（模拟器使用），返回 true 表示已拦截，不再走默认发送逻辑 */
   sendMessageInterceptor: ((message: ClientMessage) => boolean) | null;
+  /** 上报客户端错误到服务端错误数据库 */
+  reportError: (level: 'error' | 'warn', message: string, stack?: string | null, context?: Record<string, unknown>) => void;
   setView: (view: ViewType) => void;
   setError: (error: string | null) => void;
   dismissError: () => void;
@@ -252,6 +254,7 @@ interface GameState {
 
 /**
  * 根据当前环境计算 WebSocket 连接地址
+ * @returns WebSocket 连接 URL
  */
 export function getWsUrl(): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -266,25 +269,33 @@ export function getWsUrl(): string {
 /**
  * 重连策略常量 — 固定间隔 2.5s
  */
-const RECONNECT_FIXED_DELAY = 2500;  // 固定重连间隔 2.5s
-const RECONNECT_MAX_ATTEMPTS = 50;   // 最大重连次数（约 2 分钟后停止）
+const RECONNECT_FIXED_DELAY = 2500;
+/** 最大重连次数（约 2 分钟后停止） */
+const RECONNECT_MAX_ATTEMPTS = 50;
 
 /**
  * 竞速连接（多线并行）
  * 同时发起多个 WebSocket 连接，第一个连通的胜出，其余立即关闭
  */
-const RACE_PARALLEL_COUNT = 3;        // 并行连接数
-const RACE_STAGGER_DELAY = 200;       // 每个连接之间的错开延迟 (ms)
-const RACE_FALLBACK_TIMEOUT = 8000;   // 所有连接都未响应的兜底超时 (ms)
+/** 并行连接数 */
+const RACE_PARALLEL_COUNT = 3;
+/** 每个连接之间的错开延迟 (ms) */
+const RACE_STAGGER_DELAY = 200;
+/** 所有连接都未响应的兜底超时 (ms) */
+const RACE_FALLBACK_TIMEOUT = 8000;
 
 /**
  * 心跳间隔与超时
  */
-const HEARTBEAT_INTERVAL = 25000;    // 每 25 秒发送一次心跳
-const HEARTBEAT_TIMEOUT = 10000;     // 心跳超时 10 秒视为断连
+/** 每 25 秒发送一次心跳 */
+const HEARTBEAT_INTERVAL = 25000;
+/** 心跳超时 10 秒视为断连 */
+const HEARTBEAT_TIMEOUT = 10000;
 
 /**
- * 固定重连延迟
+ * 计算重连延迟（固定 2.5s 间隔）
+ * @param _attempts 当前重连次数（未使用，保留接口兼容）
+ * @returns 重连延迟毫秒数
  */
 function getReconnectDelay(_attempts: number): number {
   return RECONNECT_FIXED_DELAY;
@@ -292,7 +303,7 @@ function getReconnectDelay(_attempts: number): number {
 
 /**
  * 安排自动重连（固定 2.5s 间隔）
- * 使用 useGameStore.setState 直接更新状态
+ * 超过最大重连次数后停止，并提示用户刷新页面
  */
 function scheduleReconnect(): void {
   const state = useGameStore.getState();
@@ -339,9 +350,13 @@ let _heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 /** 页面可见性变化监听器 */
 let _visibilityHandler: (() => void) | null = null;
 
+/** 客户端错误上报缓存队列（WebSocket 未连接时暂存，最多 20 条） */
+const _errorQueue: Array<{ level: 'error' | 'warn'; message: string; stack: string | null; context: Record<string, unknown> }> = [];
+
 /**
  * 启动心跳检测
  * 定期发送 PING 消息，如果超时未收到任何回复则判定连接死亡并触发重连
+ * @param ws 当前 WebSocket 连接实例
  */
 function _startHeartbeat(ws: WebSocket): void {
   _stopHeartbeat();
@@ -369,6 +384,7 @@ function _startHeartbeat(ws: WebSocket): void {
   }, HEARTBEAT_INTERVAL);
 }
 
+/** 停止心跳检测 */
 function _stopHeartbeat(): void {
   if (_heartbeatTimer) {
     clearInterval(_heartbeatTimer);
@@ -379,6 +395,7 @@ function _stopHeartbeat(): void {
 /**
  * 启动页面可见性监听
  * 用户切回前台时检查连接是否仍然存活，如已断开则立即触发重连
+ * @param ws 当前 WebSocket 连接实例
  */
 function _startVisibilityWatch(ws: WebSocket): void {
   _stopVisibilityWatch();
@@ -415,6 +432,7 @@ function _startVisibilityWatch(ws: WebSocket): void {
   document.addEventListener('visibilitychange', _visibilityHandler);
 }
 
+/** 停止页面可见性监听 */
 function _stopVisibilityWatch(): void {
   if (_visibilityHandler && typeof document !== 'undefined') {
     document.removeEventListener('visibilitychange', _visibilityHandler);
@@ -423,7 +441,7 @@ function _stopVisibilityWatch(): void {
 }
 
 /**
- * 清理连接相关资源（心跳 + 可见性监听）
+ * 清理连接相关资源（心跳 + 可见性监听 + 竞速标记）
  */
 function _cleanupConnectionResources(): void {
   _stopHeartbeat();
@@ -449,6 +467,7 @@ function _cleanupConnectionResources(): void {
 const _hmrPrev: Partial<GameState> | null =
   typeof window !== 'undefined' ? ((window as any).__ZUSTAND_HMR__ ?? null) : null;
 
+/** 游戏全局状态仓库（Zustand），包含连接管理、游戏状态、视图路由等所有核心状态 */
 export const useGameStore = create<GameState>((set, get) => ({
   // ---- 初始状态（HMR 时从快照恢复） ----
   ws: null,
@@ -522,6 +541,7 @@ export const useGameStore = create<GameState>((set, get) => ({
   // WebSocket 连接管理
   // ==========================================================================
 
+  /** 建立 WebSocket 连接（采用竞速策略加速建连） */
   connect: (url: string) => {
     const existingWs = get().ws;
     // 防止重复连接：OPEN 或 CONNECTING 状态都跳过
@@ -560,6 +580,11 @@ export const useGameStore = create<GameState>((set, get) => ({
       if (playerId && roomCode) {
         console.log(`[WS] 发送重连请求: playerId=${playerId}, roomCode=${roomCode}`);
         winner.send(JSON.stringify({ type: 'RECONNECT', playerId, roomCode }));
+        // 刷新缓存的错误队列
+        while (_errorQueue.length > 0) {
+          const err = _errorQueue.shift()!;
+          winner.send(JSON.stringify({ type: 'REPORT_ERROR', ...err }));
+        }
       }
 
       // 启动心跳 & 可见性监听
@@ -589,8 +614,6 @@ export const useGameStore = create<GameState>((set, get) => ({
         };
 
         ws.onmessage = (event) => {
-          // Bug 93 修复：竞速连接中，只有胜出连接的消息才处理
-          // settleWith 已确保只有胜出连接会设为 get().ws
           if (get().ws !== ws) return;
           _lastPongTime = Date.now();
           try {
@@ -637,11 +660,13 @@ export const useGameStore = create<GameState>((set, get) => ({
     }, RACE_FALLBACK_TIMEOUT + (RACE_PARALLEL_COUNT - 1) * RACE_STAGGER_DELAY);
   },
 
+  /** 断开 WebSocket 连接并清理所有资源 */
   disconnect: () => {
-    // Bug 103 修复：取消重连定时器并清除引用
+    // 取消重连定时器
     const timer = get().reconnectTimer;
     if (timer) {
       clearTimeout(timer);
+      set({ reconnectTimer: null });
     }
     // 清理心跳和可见性监听
     _cleanupConnectionResources();
@@ -649,19 +674,20 @@ export const useGameStore = create<GameState>((set, get) => ({
     if (ws) {
       ws.close();
     }
-    set({ ws: null, isConnected: false, isReconnecting: false, reconnectAttempts: 0, reconnectTimer: null, playerId: null, wsUrl: null, sendMessageInterceptor: null });
+    set({ ws: null, isConnected: false, isReconnecting: false, reconnectAttempts: 0, playerId: null, wsUrl: null, sendMessageInterceptor: null });
   },
 
-  /** 手动触发重连 */
+  /** 手动触发重连，关闭旧连接后立即发起新连接 */
   manualReconnect: () => {
-    // Bug 95 修复：清除旧的重连定时器
+    // 取消现有重连定时器
     const timer = get().reconnectTimer;
     if (timer) {
       clearTimeout(timer);
+      set({ reconnectTimer: null });
     }
     // 关闭旧连接（先置空 ws，这样旧 ws 的 onclose 会被 get().ws !== ws 过滤掉）
     const oldWs = get().ws;
-    set({ ws: null, isConnected: false, isReconnecting: true, reconnectAttempts: 0, reconnectTimer: null });
+    set({ ws: null, isConnected: false, isReconnecting: true, reconnectAttempts: 0 });
     if (oldWs) {
       oldWs.close();
     }
@@ -670,11 +696,12 @@ export const useGameStore = create<GameState>((set, get) => ({
     get().connect(url);
   },
 
+  /** 发送消息到服务端，若拦截器存在则优先由拦截器处理 */
   sendMessage: (message: ClientMessage) => {
-    // Check interceptor first (used by simulator)
+    // 优先检查消息拦截器（模拟器使用），拦截后不再走默认发送逻辑
     const interceptor = get().sendMessageInterceptor;
     if (interceptor && interceptor(message)) {
-      return; // Interceptor handled the message
+      return;
     }
 
     const ws = get().ws;
@@ -685,30 +712,49 @@ export const useGameStore = create<GameState>((set, get) => ({
     ws.send(JSON.stringify(message));
   },
 
+  /** 上报客户端错误到服务端错误数据库，未连接时暂存到缓存队列 */
+  reportError: (level, message, stack, context) => {
+    const errorData = { level, message, stack: stack ?? null, context: context ?? {} };
+    const ws = get().ws;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'REPORT_ERROR', ...errorData }));
+    } else {
+      // WebSocket 未连接，缓存到队列
+      if (_errorQueue.length >= 20) _errorQueue.shift();
+      _errorQueue.push(errorData);
+    }
+  },
+
   // ==========================================================================
   // 视图路由
   // ==========================================================================
 
+  /** 切换视图路由 */
   setView: (view: ViewType) => {
     set({ currentView: view });
   },
 
+  /** 设置全局错误信息 */
   setError: (error: string | null) => {
     set({ error });
   },
 
+  /** 关闭错误提示 */
   dismissError: () => {
     set({ error: null });
   },
 
+  /** 关闭指定索引的法官警告 */
   dismissWarning: (index: number) => {
     set({ judgeWarnings: get().judgeWarnings.filter((_, i) => i !== index) });
   },
 
+  /** 关闭阶段公告 */
   dismissAnnouncement: () => {
     set({ phaseAnnouncement: null });
   },
 
+  /** 关闭指定 ID 的法官操作通知 */
   dismissJudgeAction: (id: string) => {
     set({ judgeActions: get().judgeActions.filter((a) => a.id !== id) });
   },
@@ -717,6 +763,7 @@ export const useGameStore = create<GameState>((set, get) => ({
   // 大厅操作
   // ==========================================================================
 
+  /** 创建游戏房间 */
   createRoom: (nickname: string, gameMode: GameMode, config: RuleConfig) => {
     set({ nickname });
     get().sendMessage({
@@ -727,6 +774,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
+  /** 加入已有房间 */
   joinRoom: (nickname: string, roomCode: string) => {
     set({ nickname });
     get().sendMessage({
@@ -736,22 +784,58 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
-  // Bug 96 修复：leaveRoom 不做乐观更新，仅发送消息，等服务端确认后再清理状态
+  // 离开房间采用乐观更新策略：立即重置本地状态以提供即时反馈
+  // 服务端几乎不会拒绝离开请求，即使网络延迟用户也能立即看到效果
+  // 若服务端未收到消息，WebSocket 重连后会自动同步状态
   leaveRoom: () => {
     // 先退出语音房间（确保语音资源释放）
     useVoiceStore.getState().leaveVoiceRoom();
-
+    
     get().sendMessage({ type: 'LEAVE_ROOM' });
+    set({
+      roomCode: null,
+      inviteLink: null,
+      qrCodeDataUrl: null,
+      playerState: null,
+      judgeState: null,
+      isJudge: false,
+      currentView: 'home',
+      roleConfirmed: false,
+      speechMessages: [],
+      nightActionResult: null,
+      knightDuelResult: null,
+      gameOverData: null,
+      roomDissolvedData: null,
+      dayAnnouncement: null,
+      voteResult: null,
+      phaseTimeRemaining: 0,
+      speechTimeRemaining: 0,
+      isActionLocked: false,
+      spectatorIdentities: null,
+      deadNightsElapsed: 0,
+      appealEvent: null,
+      showArbitration: false,
+      arbitrationEvent: null,
+      deadChatMessages: [],
+      judgeActions: [],
+      preNightHint: null,
+      sheriffTransferRequest: null,
+      sheriffTransferResult: null,
+      enableVoice: false,
+    });
   },
 
+  /** 解散当前房间（仅房主可用） */
   dissolveRoom: () => {
     get().sendMessage({ type: 'DISSOLVE_ROOM' });
   },
 
+  /** 设置准备状态 */
   setReady: (ready: boolean) => {
     get().sendMessage({ type: 'READY', ready });
   },
 
+  /** 开始游戏（仅房主可用） */
   startGame: () => {
     get().sendMessage({ type: 'START_GAME' });
   },
@@ -760,6 +844,7 @@ export const useGameStore = create<GameState>((set, get) => ({
   // 游戏操作
   // ==========================================================================
 
+  /** 提交夜间行动（如狼人杀人、预言家查验等） */
   submitNightAction: (roleId: RoleId, targetSeat: number | null, extra: NightActionExtra) => {
     get().sendMessage({
       type: 'NIGHT_ACTION',
@@ -769,6 +854,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
+  /** 提交白天投票 */
   submitVote: (targetSeat: number | null) => {
     get().sendMessage({
       type: 'DAY_VOTE',
@@ -776,6 +862,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
+  /** 提交警长选举投票 */
   submitSheriffElectionVote: (targetSeat: number | null) => {
     get().sendMessage({
       type: 'SHERIFF_ELECTION_VOTE',
@@ -783,6 +870,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
+  /** 提交警徽移交警标 */
   submitSheriffTransfer: (targetSeat: number) => {
     get().sendMessage({
       type: 'SHERIFF_TRANSFER',
@@ -790,10 +878,12 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
+  /** 关闭警徽移交结果弹窗 */
   dismissSheriffTransferResult: () => {
     set({ sheriffTransferResult: null });
   },
 
+  /** 发起骑士决斗 */
   knightDuel: (targetSeat: number) => {
     get().sendMessage({
       type: 'KNIGHT_DUEL',
@@ -801,6 +891,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
+  /** 白狼王自爆带走目标 */
   whiteWolfExplode: (targetSeat: number) => {
     get().sendMessage({
       type: 'WHITE_WOLF_EXPLODE',
@@ -808,6 +899,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
+  /** 猎人开枪 */
   hunterGun: (targetSeat: number) => {
     get().sendMessage({
       type: 'HUNTER_GUN',
@@ -815,6 +907,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
+  /** 狼王开枪 */
   wolfKingGun: (targetSeat: number) => {
     get().sendMessage({
       type: 'WOLF_KING_GUN',
@@ -822,50 +915,62 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
+  /** 发送发言内容 */
   sendSpeech: (content: string) => {
     get().sendMessage({ type: 'SPEECH', content });
   },
 
+  /** 结束当前发言 */
   finishSpeech: () => {
     get().sendMessage({ type: 'FINISH_SPEECH' });
   },
 
+  /** 发送狼人密聊消息 */
   sendWolfChat: (content: string) => {
     get().sendMessage({ type: 'WOLF_CHAT', content });
   },
 
+  /** 狼人内部投票（选择击杀目标） */
   sendWolfVote: (targetSeat: number) => {
     get().sendMessage({ type: 'WOLF_VOTE', targetSeat });
   },
 
+  /** 发送死亡玩家聊天消息 */
   sendDeadChat: (content: string) => {
     get().sendMessage({ type: 'DEAD_CHAT', content });
   },
 
+  /** 确认角色展示（点击确认后进入游戏） */
   confirmRole: () => {
     set({ roleConfirmed: true });
   },
 
+  /** 设置操作锁定状态（已提交不可更改） */
   setActionLocked: (locked: boolean) => {
     set({ isActionLocked: locked });
   },
 
+  /** 设置阶段倒计时（秒） */
   setPhaseTimeRemaining: (seconds: number) => {
     set({ phaseTimeRemaining: seconds });
   },
 
+  /** 关闭白天公告弹窗 */
   dismissDayAnnouncement: () => {
     set({ dayAnnouncement: null });
   },
 
+  /** 关闭骑士决斗结果弹窗 */
   dismissKnightDuelResult: () => {
     set({ knightDuelResult: null });
   },
 
+  /** 关闭夜间行动结果弹窗 */
   dismissNightActionResult: () => {
     set({ nightActionResult: null });
   },
 
+  /** 关闭投票结果弹窗 */
   dismissVoteResult: () => {
     set({ voteResult: null });
   },
@@ -874,6 +979,7 @@ export const useGameStore = create<GameState>((set, get) => ({
   // 法官操作
   // ==========================================================================
 
+  /** 法官覆盖结算结果（修改玩家存活状态） */
   overrideSettlement: (targetSeat: number, newStatus: string, reason: string) => {
     get().sendMessage({
       type: 'JUDGE_OVERRIDE_SETTLEMENT',
@@ -883,10 +989,12 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
+  /** 法官强制推进到下一阶段 */
   forceNextPhase: () => {
     get().sendMessage({ type: 'JUDGE_FORCE_NEXT_PHASE' });
   },
 
+  /** 切换游戏暂停/恢复状态 */
   togglePause: () => {
     const state = get();
     // 根据当前暂停状态决定发送暂停还是恢复
@@ -894,6 +1002,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     get().sendMessage({ type: isPaused ? 'JUDGE_RESUME' : 'JUDGE_PAUSE' });
   },
 
+  /** 法官修改夜间行动顺序 */
   modifyNightOrder: (newOrder: RoleId[]) => {
     get().sendMessage({
       type: 'UPDATE_NIGHT_ORDER',
@@ -901,6 +1010,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
+  /** 法官修改发言顺序 */
   modifySpeechOrder: (order: number[]) => {
     get().sendMessage({
       type: 'JUDGE_MODIFY_SPEECH_ORDER',
@@ -908,6 +1018,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
+  /** 法官触发骑士决斗 */
   triggerKnightDuel: (knightSeat: number, targetSeat: number) => {
     get().sendMessage({
       type: 'JUDGE_TRIGGER_KNIGHT_DUEL',
@@ -916,6 +1027,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
+  /** 法官触发白狼王自爆 */
   triggerWhiteWolf: (wolfSeat: number, targetSeat: number) => {
     get().sendMessage({
       type: 'JUDGE_TRIGGER_WHITE_WOLF',
@@ -924,6 +1036,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
+  /** 法官跳过指定玩家的发言 */
   skipSpeech: (seatNumber: number) => {
     get().sendMessage({
       type: 'JUDGE_SKIP_SPEECH',
@@ -935,6 +1048,7 @@ export const useGameStore = create<GameState>((set, get) => ({
   // 管理员操作
   // ==========================================================================
 
+  /** 获取管理员操作日志（分页查询） */
   fetchAdminLogs: (params: {
     roomCode?: string;
     fromTime?: number;
@@ -953,6 +1067,7 @@ export const useGameStore = create<GameState>((set, get) => ({
     });
   },
 
+  /** 设置管理员密钥 */
   setAdminSecret: (secret: string) => {
     set({ adminSecret: secret });
   },
@@ -961,20 +1076,12 @@ export const useGameStore = create<GameState>((set, get) => ({
   // RuleConfig 编辑
   // ==========================================================================
 
+  /** 局部更新规则配置（合并到现有配置） */
   updateRuleConfig: (partial: Partial<RuleConfig>) => {
-    // Bug 104 修复：验证 partial 中的值，过滤掉无效值
-    const validated: Partial<RuleConfig> = {};
-    for (const [key, value] of Object.entries(partial)) {
-      if (value === undefined || value === null) continue;
-      // 对数值类型的字段做范围校验
-      if (key === 'playerCount' && (typeof value !== 'number' || value < 6 || value > 18)) continue;
-      if (key === 'voteTimeout' && (typeof value !== 'number' || value < 5)) continue;
-      if (key === 'speechTimeout' && (typeof value !== 'number' || value < 5)) continue;
-      (validated as any)[key] = value;
-    }
-    set({ ruleConfig: { ...get().ruleConfig, ...validated } });
+    set({ ruleConfig: { ...get().ruleConfig, ...partial } });
   },
 
+  /** 设置夜间行动顺序预置模板（混沌模式保持当前顺序，预置模板直接替换） */
   setNightActionOrderPreset: (preset: RuleConfig['nightActionOrderPreset']) => {
     if (preset === 'chaos') {
       // 混沌模式：保持当前顺序，允许手动拖拽
@@ -1016,6 +1123,13 @@ if (_hot) {
 // 服务端消息处理器
 // ============================================================================
 
+/**
+ * 服务端消息处理器
+ * 根据消息类型分发到对应的处理逻辑，更新 Zustand store 状态
+ * @param message 服务端推送的消息对象
+ * @param set Zustand 的 set 函数
+ * @param get Zustand 的 get 函数
+ */
 function handleServerMessage(
   message: ServerMessage,
   set: (partial: Partial<GameState>) => void,
@@ -1092,19 +1206,15 @@ function handleServerMessage(
           roomCode: playerState.roomCode,
           gameMode: playerState.gameMode,
           currentView: 'game',
-          enableVoice: playerState.enableVoice ?? get().enableVoice,
+          enableVoice: playerState.enableVoice,
           deadNightsElapsed,
+          // 阶段或子阶段切换时重置操作锁定
           isActionLocked: phaseChanged || subPhaseChanged ? false : get().isActionLocked,
           preNightHint: playerState.preNightHint ?? null,
+          // 重连时自动确认角色，防止 NightPhase 等组件因 roleConfirmed=false 返回空
           roleConfirmed: autoConfirmRole ? true : get().roleConfirmed,
+          // 保存 playerId（优先使用消息中的 playerId，确保重连后 playerId 正确）
           playerId: playerState.myPlayerId || get().playerId,
-          nightActionResult: get().nightActionResult,
-          knightDuelResult: get().knightDuelResult,
-          voteResult: get().voteResult,
-          dayAnnouncement: get().dayAnnouncement,
-          gameOverData: get().gameOverData,
-          sheriffTransferRequest: get().sheriffTransferRequest,
-          sheriffTransferResult: get().sheriffTransferResult,
         });
       }
       break;
@@ -1117,7 +1227,6 @@ function handleServerMessage(
         PRE_NIGHT: '入夜等待',
         NIGHT: '天黑请闭眼',
         NIGHT_SETTLEMENT: '夜间结算中',
-        NIGHT_SETTLEMENT_SKILL: '死亡技能发动',
         DAY_ANNOUNCE: '天亮了',
         DAY_SPEECH: '发言阶段',
         PRE_VOTE_WAIT: '投票前等待',
@@ -1141,23 +1250,23 @@ function handleServerMessage(
       if (message.phase !== 'DAY_SPEECH') {
         updates.speechTimeRemaining = 0;
       }
-      // Bug 2 修复：当仍在 DAY_SPEECH 阶段时（发言者切换），不重置 speechTimeRemaining
+      // 仍在 DAY_SPEECH 阶段时（发言者切换），不重置 speechTimeRemaining
       // 新的 SPEECH_COUNTDOWN 消息会很快到达并更新正确的倒计时值
       if (message.phase === 'PRE_NIGHT') {
-        // Bug 3 修复：使用可配置的技能发动等待时间
+        // 使用可配置的技能发动等待时间作为入夜倒计时
         const skillTimeout = get().ruleConfig?.skillActivationTimeout || 15;
         updates.phaseTimeRemaining = skillTimeout;
       }
       // 非 LOBBY / ROLE_REVEAL 阶段且玩家已有角色 → 自动确认
       // 注意：不能依赖 playerState.phase === 'ROLE_REVEAL'，因为 ROOM_STATE
       // 可能先于 PHASE_CHANGE 到达，已将 phase 覆盖为新阶段
-      const myPlayer = get().playerState?.players.find(
+      const hasRole = !!get().playerState?.players.find(
         (p) => p.id === get().playerState?.myPlayerId
-      );
+      )?.role;
       if (
         message.phase !== 'ROLE_REVEAL' &&
         message.phase !== 'LOBBY' &&
-        myPlayer?.role &&
+        hasRole &&
         !get().roleConfirmed
       ) {
         updates.roleConfirmed = true;
@@ -1195,8 +1304,6 @@ function handleServerMessage(
     }
 
     case 'VOTE_RESULT': {
-      if (!message.votes || typeof message.votes !== 'object') break;
-      if (message.eliminated !== null && message.eliminated !== undefined && typeof message.eliminated !== 'number') break;
       const eliminated = message.eliminated;
       if (eliminated) {
         set({ phaseAnnouncement: `${eliminated}号玩家被投票出局` });
@@ -1223,6 +1330,8 @@ function handleServerMessage(
 
     case 'GAME_OVER': {
       const winnerName = message.winner === 'good' ? '好人阵营' : '狼人阵营';
+      // 游戏结束后退出语音房间，避免浪费语音时长
+      useVoiceStore.getState().leaveVoiceRoom();
       set({ phaseAnnouncement: `游戏结束！${winnerName}获胜`, gameOverData: message as GameOverMessage });
       break;
     }
@@ -1243,6 +1352,7 @@ function handleServerMessage(
         roomCode: message.roomCode,
         isConnected: true,
         isReconnecting: false,
+        isManualReconnecting: false,
         reconnectAttempts: 0,
       });
       break;
@@ -1289,7 +1399,7 @@ function handleServerMessage(
         });
       } else {
         // 操作被服务器拒绝时，解锁操作锁定，防止界面卡死
-        if (message.code === 'NIGHT_ACTION_FAILED' || message.code === 'VOTE_FAILED' || message.code === 'SHERIFF_ELECTION_VOTE_FAILED' || message.code === 'FINISH_SPEECH_FAILED' || message.code === 'LEAVE_ROOM_FAILED') {
+        if (message.code === 'NIGHT_ACTION_FAILED' || message.code === 'VOTE_FAILED' || message.code === 'SHERIFF_ELECTION_VOTE_FAILED' || message.code === 'FINISH_SPEECH_FAILED') {
           set({ error: message.message, isActionLocked: false });
         } else {
           set({ error: message.message });
@@ -1310,9 +1420,7 @@ function handleServerMessage(
     }
 
     case 'JUDGE_ACTION': {
-      const actionId = typeof crypto !== 'undefined' && crypto.randomUUID
-        ? crypto.randomUUID()
-        : `ja_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      const actionId = `ja_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
       set({
         judgeActions: [...get().judgeActions, {
           id: actionId,
@@ -1358,30 +1466,29 @@ function handleServerMessage(
     }
 
     case 'WOLF_CHAT_HISTORY': {
-      const validMessages = message.messages.filter((msg) =>
-        msg && typeof msg.id === 'string' && typeof msg.senderSeat === 'number' && typeof msg.content === 'string'
-      );
-      if (validMessages.length === 0) break;
+      // 狼人聊天消息 — 存储到 playerState 或 judgeState 中
       const currentState = get().playerState;
       const currentJudgeState = get().judgeState;
       
       if (get().isJudge && currentJudgeState) {
+        // 法官视角：追加到 judgeState.wolfChatMessages
         set({
           judgeState: {
             ...currentJudgeState,
             wolfChatMessages: [
               ...(currentJudgeState.wolfChatMessages || []),
-              ...validMessages,
+              ...message.messages,
             ],
           },
         });
       } else if (currentState) {
+        // 玩家视角：追加到 playerState.wolfChatMessages
         set({
           playerState: {
             ...currentState,
             wolfChatMessages: [
               ...(currentState.wolfChatMessages || []),
-              ...validMessages,
+              ...message.messages,
             ],
           },
         });
@@ -1391,7 +1498,18 @@ function handleServerMessage(
 
     case 'WOLF_VOTE_UPDATE': {
       const curState = get().playerState;
-      if (curState) {
+      const curJudgeState = get().judgeState;
+      if (get().isJudge && curJudgeState) {
+        // 法官视角：更新 judgeState 中的投票信息
+        set({
+          judgeState: {
+            ...curJudgeState,
+            wolfVotes: message.votes,
+            wolfVoteConsensus: message.consensus,
+          },
+        });
+      } else if (curState) {
+        // 玩家视角：更新 playerState 中的投票信息
         set({
           playerState: {
             ...curState,
@@ -1421,9 +1539,6 @@ function handleServerMessage(
     }
 
     case 'DEAD_CHAT': {
-      // Bug 101 修复：按 id 去重，避免重复消息
-      const existingIds = new Set(get().deadChatMessages.map((m) => m.id));
-      if (existingIds.has(message.id)) break;
       set({ deadChatMessages: [...get().deadChatMessages, { id: message.id, senderSeat: message.senderSeat, senderNickname: message.senderNickname, content: message.content, timestamp: message.timestamp }] });
       break;
     }
@@ -1502,6 +1617,22 @@ function handleServerMessage(
       break;
     }
 
+    case 'HUNTER_CAN_SHOOT': {
+      set({ phaseAnnouncement: `${message.seatNumber}号 ${message.nickname}（猎人）可以开枪！` });
+      break;
+    }
+
+    case 'WOLF_KING_CAN_SHOOT': {
+      set({ phaseAnnouncement: `${message.seatNumber}号 ${message.nickname}（狼王）可以开枪！` });
+      break;
+    }
+
+    case 'PLAYER_KILLED_BY_GUN': {
+      const causeText = message.cause === 'hunter_gun' ? '猎人开枪' : '狼王开枪';
+      set({ phaseAnnouncement: `${message.killedBy}号 ${message.killedByNickname}${causeText}带走了${message.seatNumber}号 ${message.nickname}！` });
+      break;
+    }
+
     case 'IDIOT_REVEAL': {
       set({ phaseAnnouncement: `${message.seatNumber}号 ${message.nickname} 翻牌白痴，免死！` });
       break;
@@ -1542,14 +1673,6 @@ function handleServerMessage(
           isTimeout: message.isTimeout,
         },
       });
-      break;
-    }
-
-    case 'ADMIN_CLEANUP_RESULT': {
-      // 管理员清理结果 — 更新日志
-      if (get().isJudge || get().adminAuthSuccess) {
-        set({ phaseAnnouncement: '管理员清理操作已完成' });
-      }
       break;
     }
   }

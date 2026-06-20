@@ -1,12 +1,13 @@
 /**
  * ============================================================================
- * 狼人杀联机游戏 — Mongoose 数据模型定义
+ * 数据模型 — Mongoose Schema 与 MongoDB 连接管理
  * ============================================================================
  *
  * 架构说明：
- *   本文件定义了 MongoDB 的两个核心集合 Schema：
- *   1. Room — 房间状态持久化（断线重连、服务重启后恢复）
- *   2. GameLog — 全局操作日志（复盘、审计、Admin 后台查询）
+ *   1. 定义 MongoDB 的三个核心集合 Schema：Room、GameLog、WolfChatLog
+ *   2. 管理游戏主数据库的连接、断线重连和优雅关闭
+ *   3. 提供房间状态持久化（断线重连、服务重启后恢复）
+ *   4. 提供全局操作日志（复盘、审计、Admin 后台查询）
  *
  * 设计原则：
  *   - Schema 严格对应 shared/types.ts 中的接口定义
@@ -46,10 +47,6 @@ import type {
   RevealIdentityOnDayVote,
   WolfChatMessage,
   WolfChatLog,
-} from '@langrensha/shared';
-import {
-  VALID_ROLE_ID_SET,
-  hasNightAction,
 } from '@langrensha/shared';
 
 // ============================================================================
@@ -92,7 +89,6 @@ const PlayerSubSchema = new Schema<Player>({
   idiotRevealed: { type: Boolean, required: true, default: false },
   hunterGunFired: { type: Boolean, required: true, default: false },
   wolfKingGunFired: { type: Boolean, required: true, default: false },
-  knightHasDueled: { type: Boolean, required: true, default: false },
   hiddenWolfHasActed: { type: Boolean, default: false },
   mechanicalWolfImitateTarget: { type: Number, default: null },
   mechanicalWolfPhase: { type: String, default: null, enum: ['selecting', 'learning', 'active', 'failed', 'silent', null] },
@@ -213,29 +209,17 @@ const RuleConfigSubSchema = new Schema<RuleConfig>({
   nightActionOrder: {
     type: [String],
     required: true,
-    validate: [
-      {
-        validator(v: string[]) {
-          return v.every((r) => VALID_ROLE_ID_SET.has(r));
-        },
-        message: 'nightActionOrder 包含非法角色ID',
+    validate: {
+      validator(v: string[]) {
+        // 每个元素必须是合法的 RoleId
+        const validRoles = new Set([
+          'villager', 'seer', 'witch', 'hunter', 'guard', 'idiot', 'knight',
+          'werewolf', 'white_wolf_king', 'wolf_king', 'nightmare_shadow', 'hidden_wolf', 'mechanical_wolf',
+        ]);
+        return v.every((r) => validRoles.has(r));
       },
-      {
-        validator(v: string[], this_: any) {
-          const rd = this_.roleDistribution as Map<string, number> | undefined;
-          if (!rd || rd.size === 0) return true;
-          const nightActionRoles: string[] = [];
-          for (const [role, count] of rd.entries()) {
-            if (count > 0 && hasNightAction(role as RoleId)) {
-              nightActionRoles.push(role);
-            }
-          }
-          const orderSet = new Set(v);
-          return nightActionRoles.every((r) => orderSet.has(r));
-        },
-        message: 'nightActionOrder 必须包含 roleDistribution 中所有拥有夜间行动的角色',
-      },
-    ],
+      message: 'nightActionOrder 包含非法角色ID',
+    },
   },
   nightActionOrderPreset: {
     type: String,
@@ -298,26 +282,16 @@ const RuleConfigSubSchema = new Schema<RuleConfig>({
     type: [String],
     required: true,
     default: ['werewolf', 'wolf_king', 'nightmare_shadow'],
-    validate: [
-      {
-        validator(v: string[]) {
-          const validRoles = new Set(VALID_ROLE_ID_SET);
-          return v.every((r) => validRoles.has(r));
-        },
-        message: 'sharedWolfRoles 包含非法角色ID',
+    validate: {
+      validator(v: string[]) {
+        const validRoles = new Set([
+          'villager', 'seer', 'witch', 'hunter', 'guard', 'idiot', 'knight',
+          'werewolf', 'white_wolf_king', 'wolf_king', 'nightmare_shadow', 'hidden_wolf', 'mechanical_wolf',
+        ]);
+        return v.every((r) => validRoles.has(r));
       },
-      {
-        validator(v: string[], this_: any) {
-          const rd = this_.roleDistribution as Map<string, number> | undefined;
-          if (!rd || rd.size === 0) return true;
-          return v.every((r) => {
-            const count = rd.get(r);
-            return count !== undefined && count > 0;
-          });
-        },
-        message: 'sharedWolfRoles 中的角色必须在 roleDistribution 中存在且数量大于0',
-      },
-    ],
+      message: 'sharedWolfRoles 包含非法角色ID',
+    },
   },
 
   // ---- 发言顺序 ----
@@ -403,6 +377,7 @@ export interface RoomDocument extends Document {
   startedAt: number | null;
   endedAt: number | null;
   configVersion: number;
+  pendingDeathSkill: any;
 }
 
 const RoomSchema = new Schema<RoomDocument>({
@@ -460,6 +435,7 @@ const RoomSchema = new Schema<RoomDocument>({
   startedAt: { type: Number, default: null },
   endedAt: { type: Number, default: null },
   configVersion: { type: Number, default: 10 },
+  pendingDeathSkill: { type: Object, default: null },
 }, {
   strict: 'throw',
   timestamps: false, // 使用自定义的 createdAt
@@ -652,88 +628,6 @@ WolfChatLogSchema.index({ roomCode: 1, timestamp: -1 });
 // ============================================================================
 
 /**
- * 已知字段白名单，用于创建记录时过滤未知字段
- * 防止意外写入 Schema 中未定义的字段
- */
-const GAME_LOG_KNOWN_FIELDS = new Set([
-  'roomCode', 'gameId', 'timestamp', 'actorSeat', 'actorNickname',
-  'actionType', 'targetSeat', 'targetNickname', 'phase', 'round',
-  'detail', 'overridden', 'overrideReason', 'nightActionOrderSnapshot',
-]);
-
-const WOLF_CHAT_LOG_KNOWN_FIELDS = new Set([
-  'roomCode', 'gameId', 'round', 'senderSeat', 'senderNickname',
-  'content', 'timestamp', 'visibility',
-]);
-
-const ROOM_KNOWN_FIELDS = new Set([
-  'roomCode', 'gameMode', 'phase', 'nightSubPhase', 'round', 'config',
-  'players', 'speechOrder', 'currentSpeakerIndex', 'currentSpeechRound',
-  'votes', 'sheriffElectionVotes', 'pkCandidates', 'nightActions',
-  'werewolfTarget', 'witchSaveTarget', 'witchPoisonTarget',
-  'guardProtectTarget', 'nightmareTarget', 'wolfVotes', 'wolfVoteConsensus',
-  'nightDeaths', 'dayDeaths', 'isPaused', 'winner',
-  'createdAt', 'startedAt', 'endedAt', 'configVersion',
-]);
-
-/**
- * 过滤对象中的未知字段，只保留白名单中的字段
- * 用于在创建记录前清理输入数据
- */
-export function filterKnownFields<T extends Record<string, unknown>>(
-  data: T,
-  allowedFields: Set<string>,
-): Partial<T> {
-  const result: Record<string, unknown> = {};
-  for (const key of Object.keys(data)) {
-    if (allowedFields.has(key)) {
-      result[key] = data[key];
-    }
-  }
-  return result as Partial<T>;
-}
-
-/**
- * 过滤 GameLog 记录中的未知字段
- */
-export function filterGameLogFields<T extends Record<string, unknown>>(data: T): Partial<T> {
-  return filterKnownFields(data, GAME_LOG_KNOWN_FIELDS);
-}
-
-/**
- * 过滤 WolfChatLog 记录中的未知字段
- */
-export function filterWolfChatLogFields<T extends Record<string, unknown>>(data: T): Partial<T> {
-  return filterKnownFields(data, WOLF_CHAT_LOG_KNOWN_FIELDS);
-}
-
-/**
- * 过滤 Room 记录中的未知字段
- */
-export function filterRoomFields<T extends Record<string, unknown>>(data: T): Partial<T> {
-  return filterKnownFields(data, ROOM_KNOWN_FIELDS);
-}
-
-/**
- * 在 MongoDB 事务中执行操作
- * 需要副本集支持，如果未启用副本集则降级为普通操作
- */
-export async function withTransaction<T>(
-  fn: (session: mongoose.ClientSession) => Promise<T>,
-): Promise<T> {
-  const session = await mongoose.startSession();
-  try {
-    let result: T;
-    await session.withTransaction(async () => {
-      result = await fn(session);
-    });
-    return result!;
-  } finally {
-    await session.endSession();
-  }
-}
-
-/**
  * 房间 Model — 用于房间状态的 CRUD 操作
  * 服务端在内存中维护 RoomState，定期同步到此集合
  * 断线重连时从此集合恢复状态
@@ -764,7 +658,11 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
  * 连接 MongoDB
- * 支持断线自动重连，重连间隔指数退避（1s → 2s → 4s → 最大 30s）
+ *
+ * 支持断线自动重连，重连间隔指数退避（1s → 2s → 4s → 最大 30s）。
+ * 连接成功后监听断线和重连事件，自动触发重连流程。
+ *
+ * @param uri - MongoDB 连接字符串
  */
 export async function connectMongoDB(uri: string): Promise<void> {
   const MAX_RECONNECT_INTERVAL = 30_000;
@@ -824,14 +722,18 @@ export async function connectMongoDB(uri: string): Promise<void> {
 }
 
 /**
- * 获取连接状态
+ * 获取 MongoDB 连接状态
+ *
+ * @returns 是否已连接且就绪
  */
 export function isMongoConnected(): boolean {
   return isConnected && mongoose.connection.readyState === 1;
 }
 
 /**
- * 优雅关闭连接
+ * 优雅关闭 MongoDB 连接
+ *
+ * 清理重连定时器后断开连接，确保资源正确释放。
  */
 export async function disconnectMongoDB(): Promise<void> {
   if (reconnectTimer) {

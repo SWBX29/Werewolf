@@ -1,26 +1,39 @@
+/**
+ * ============================================================================
+ * CountdownTimer — 可复用倒计时组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 显示进度条 + 秒数文本，颜色随剩余时间变化
+ *
+ * 设计原则：
+ *   - 使用单个 interval 驱动，仅依赖 seconds prop
+ *   - 防止 onExpire 多次触发
+ *   - seconds prop 变化时自动重置状态
+ * ============================================================================
+ */
+
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 
-/**
- * 可复用倒计时组件
- * 显示进度条 + 秒数文本，颜色随剩余时间变化
- */
+/** 倒计时组件属性接口 */
 interface CountdownTimerProps {
+  /** 总秒数 */
   seconds: number;
+  /** 倒计时结束回调 */
   onExpire?: () => void;
+  /** 紧急阈值（秒），低于此值时显示紧急样式 */
   urgentThreshold?: number;
 }
 
-const MAX_COUNTDOWN_SECONDS = 3600;
-
+/** 可复用倒计时组件，显示进度条 + 秒数文本，颜色随剩余时间变化 */
 function CountdownTimer({
-  seconds: rawSeconds,
+  seconds,
   onExpire,
   urgentThreshold = 10,
 }: CountdownTimerProps) {
-  const seconds = Math.min(MAX_COUNTDOWN_SECONDS, Math.max(0, rawSeconds));
   const [remaining, setRemaining] = useState(seconds);
   const onExpireRef = useRef(onExpire);
-  // Bug 5 修复：添加标记防止 onExpire 多次触发
+  // 防止 onExpire 多次触发
   const hasExpiredRef = useRef(false);
   
   onExpireRef.current = onExpire;
@@ -31,7 +44,7 @@ function CountdownTimer({
     hasExpiredRef.current = false;
   }, [seconds]);
 
-  // Bug 5 修复：使用单个 interval，不依赖 remaining
+  // 使用单个 interval 驱动倒计时，不依赖 remaining 状态
   useEffect(() => {
     if (seconds <= 0) return;
 

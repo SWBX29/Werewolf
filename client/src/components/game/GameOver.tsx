@@ -1,8 +1,23 @@
+/**
+ * ============================================================================
+ * GameOver — 游戏结束界面
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 显示获胜阵营、存活玩家、全场身份等结算信息
+ *
+ * 设计原则：
+ *   - 支持展开查看全场身份详情
+ *   - 防御性检查角色数据，避免无效角色导致崩溃
+ * ============================================================================
+ */
+
 import React, { useState } from 'react';
 import { useGameStore } from '../../useGameStore';
 import { ROLE_META, DEATH_CAUSE_NAMES } from '@langrensha/shared';
 import type { Faction } from '@langrensha/shared';
 
+/** 游戏结束界面组件，显示获胜阵营和全场身份 */
 const GameOver: React.FC = () => {
   const gameOverData = useGameStore((s) => s.gameOverData);
   const leaveRoom = useGameStore((s) => s.leaveRoom);
@@ -15,7 +30,7 @@ const GameOver: React.FC = () => {
   const isGoodWin = winner === 'good';
   const winnerText = isGoodWin ? '好人阵营' : '狼人阵营';
 
-  // Bug 23 修复：添加防御性检查，避免无效角色导致崩溃
+  // 防御性检查角色数据，避免无效角色导致崩溃
   const survivingWolves = finalStats.filter(
     (s) => s.status === 'alive' && ROLE_META[s.role]?.faction === 'evil'
   );

@@ -1,3 +1,19 @@
+/**
+ * ============================================================================
+ * simulator/storeInjector — 模拟器状态桥接器
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 将模拟器连接状态注入 useGameStore，复用现有游戏组件
+ *   2. 安装消息拦截器，将游戏组件的消息路由到模拟器 WebSocket
+ *   3. 根据服务端消息更新 useGameStore 中的特定字段
+ *
+ * 设计原则：
+ *   - 单向数据流：模拟器 store → useGameStore
+ *   - 切换玩家时完全重置，状态更新时只更新数据
+ * ============================================================================
+ */
+
 import { useGameStore } from '../../useGameStore';
 import type { PlayerRoomStateDTO, JudgeRoomStateDTO } from '@langrensha/shared';
 import type { SimConnection } from './types';
@@ -5,9 +21,9 @@ import { sendMessage } from './websocket';
 import { useSimulatorStore } from './useSimulatorStore';
 
 /**
- * Inject a player's state into useGameStore so existing game components work.
- * @param fullReset - When true, reset all game-related fields (used on player switch).
- *                     When false, only update the state data without clearing results.
+ * 将玩家/法官状态注入 useGameStore，使现有游戏组件可直接使用
+ * @param fullReset - 为 true 时重置所有游戏相关字段（切换玩家时使用），
+ *                    为 false 时仅更新状态数据，保留结果数据
  */
 export function injectStateToGameStore(
   state: PlayerRoomStateDTO | JudgeRoomStateDTO,
@@ -93,13 +109,13 @@ export function injectStateToGameStore(
     });
   }
 
-  // Install the message interceptor
+  // 安装消息拦截器
   installMessageInterceptor();
 }
 
 /**
- * Install a message interceptor into useGameStore that routes messages
- * through the simulator's WebSocket connections instead of the default one.
+ * 安装消息拦截器，将游戏组件的消息路由到模拟器 WebSocket 连接
+ * 而非默认的主客户端连接
  */
 function installMessageInterceptor(): void {
   useGameStore.setState({
@@ -122,7 +138,7 @@ function installMessageInterceptor(): void {
         }
       }
 
-      // Player messages go through selected player's connection
+      // 玩家消息通过选中玩家的连接发送
       const selectedId = simState.selectedPlayerId;
       if (selectedId) {
         const conn = simState.connections.get(selectedId);
@@ -132,21 +148,19 @@ function installMessageInterceptor(): void {
         }
       }
 
-      // Fallback: try judge connection
+      // 兜底：尝试法官连接
       const judgeConn = simState.judgeConnection;
       if (judgeConn?.ws && judgeConn.isConnected) {
         sendMessage(judgeConn.ws, message);
         return true;
       }
 
-      return false; // Let original sendMessage handle it
+      return false; // 交由原始 sendMessage 处理
     },
   });
 }
 
-/**
- * Clear all injected state and remove the interceptor
- */
+/** 清除所有注入状态并移除消息拦截器 */
 export function clearInjectedState(): void {
   useGameStore.setState({
     sendMessageInterceptor: null,
@@ -168,9 +182,7 @@ export function clearInjectedState(): void {
   });
 }
 
-/**
- * Update specific game store fields based on server messages received by the simulator
- */
+/** 根据模拟器收到的服务端消息更新 useGameStore 中的特定字段 */
 export function updateGameStoreFromMessage(msg: any): void {
   switch (msg.type) {
     case 'PHASE_CHANGE': {
@@ -301,6 +313,17 @@ export function updateGameStoreFromMessage(msg: any): void {
     case 'WOLF_KING_GUN_RESULT':
       useGameStore.setState({ phaseAnnouncement: `狼王开枪！带走了${msg.targetSeat}号 ${msg.targetNickname}` });
       break;
+    case 'HUNTER_CAN_SHOOT':
+      useGameStore.setState({ phaseAnnouncement: `${msg.seatNumber}号 ${msg.nickname}（猎人）可以开枪！` });
+      break;
+    case 'WOLF_KING_CAN_SHOOT':
+      useGameStore.setState({ phaseAnnouncement: `${msg.seatNumber}号 ${msg.nickname}（狼王）可以开枪！` });
+      break;
+    case 'PLAYER_KILLED_BY_GUN': {
+      const causeText = msg.cause === 'hunter_gun' ? '猎人开枪' : '狼王开枪';
+      useGameStore.setState({ phaseAnnouncement: `${msg.killedBy}号 ${msg.killedByNickname}${causeText}带走了${msg.seatNumber}号 ${msg.nickname}！` });
+      break;
+    }
     case 'IDIOT_REVEAL':
       useGameStore.setState({ phaseAnnouncement: `${msg.seatNumber}号 ${msg.nickname} 翻牌白痴，免死！` });
       break;
@@ -407,93 +430,6 @@ export function updateGameStoreFromMessage(msg: any): void {
     }
     case 'WOLF_PHASE_SKIPPED':
       useGameStore.setState({ phaseAnnouncement: msg.publicMessage });
-      break;
-    case 'NIGHT_ACTION_REQUEST': {
-      const state = useGameStore.getState();
-      const updates: Record<string, unknown> = {};
-      if (state.playerState) {
-        updates.playerState = { ...state.playerState, nightActionRequest: msg.request };
-      }
-      // 收到新的夜间行动请求时重置操作锁定
-      updates.isActionLocked = false;
-      useGameStore.setState(updates as any);
-      break;
-    }
-    case 'WOLF_VOTE_UPDATE': {
-      const state = useGameStore.getState();
-      if (state.playerState) {
-        useGameStore.setState({
-          playerState: {
-            ...state.playerState,
-            wolfVotes: msg.votes,
-            wolfVoteConsensus: msg.consensus,
-          },
-        });
-      }
-      break;
-    }
-    case 'PLAYER_JOINED': {
-      const state = useGameStore.getState();
-      if (state.playerState) {
-        useGameStore.setState({
-          playerState: {
-            ...state.playerState,
-            players: [...state.playerState.players, msg.player],
-          },
-        });
-      }
-      break;
-    }
-    case 'PLAYER_LEFT': {
-      const state = useGameStore.getState();
-      if (state.playerState) {
-        useGameStore.setState({
-          playerState: {
-            ...state.playerState,
-            players: state.playerState.players.filter((p: any) => p.seatNumber !== msg.seatNumber),
-          },
-        });
-      }
-      break;
-    }
-    case 'PLAYER_READY': {
-      const state = useGameStore.getState();
-      if (state.playerState) {
-        useGameStore.setState({
-          playerState: {
-            ...state.playerState,
-            players: state.playerState.players.map((p: any) =>
-              p.seatNumber === msg.seatNumber ? { ...p, isReady: msg.ready } : p
-            ),
-          },
-        });
-      }
-      break;
-    }
-    case 'RECONNECT_SUCCESS':
-      useGameStore.setState({ phaseAnnouncement: '重连成功' });
-      break;
-    case 'ERROR':
-      useGameStore.setState({ phaseAnnouncement: `❌ 错误：${msg.message}` });
-      break;
-    case 'JUDGE_WARNING':
-      useGameStore.setState({ phaseAnnouncement: `⚠️ ${msg.message}` });
-      break;
-    case 'SPEECH_ORDER_UPDATE': {
-      const state = useGameStore.getState();
-      if (state.playerState) {
-        useGameStore.setState({
-          playerState: {
-            ...state.playerState,
-            speechOrder: msg.order,
-          },
-        });
-      }
-      break;
-    }
-    case 'PHASE_REMINDER':
-      break;
-    default:
       break;
   }
 }

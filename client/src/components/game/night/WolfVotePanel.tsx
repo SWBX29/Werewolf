@@ -1,3 +1,19 @@
+/**
+ * ============================================================================
+ * WolfVotePanel — 狼人投票面板
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 共同睁眼的狼人选择击杀目标
+ *   2. 投票可修改：倒计时结束前可随时更改选择
+ *
+ * 设计原则：
+ *   - 集成狼人聊天区域
+ *   - 显示投票进度和共识状态
+ *   - 重连时同步服务端投票状态
+ * ============================================================================
+ */
+
 import { useState, useEffect } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import TargetSelector from '../TargetSelector';
@@ -5,10 +21,7 @@ import WolfChat from './WolfChat';
 import ConfirmDialog from '../ConfirmDialog';
 import { MyActionInfo } from './NightWaiting';
 
-/**
- * 狼人投票面板 — 共同睁眼的狼人选择击杀目标
- * 投票可修改：倒计时结束前可随时更改选择
- */
+/** 狼人投票面板，共同睁眼的狼人选择击杀目标 */
 export default function WolfVotePanel() {
   const playerState = useGameStore((s) => s.playerState);
   const sendWolfVote = useGameStore((s) => s.sendWolfVote);
@@ -28,7 +41,7 @@ export default function WolfVotePanel() {
   const [hasVoted, setHasVoted] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  // Bug 3 修复：使用 useEffect 同步投票状态，处理重连场景
+  // 使用 useEffect 同步投票状态，处理重连场景
   useEffect(() => {
     // 同步服务端的投票状态到本地
     setSelected(myCurrentVote);
@@ -38,9 +51,7 @@ export default function WolfVotePanel() {
   if (!nightActionRequest) return null;
 
   // 统计投票进度
-  const totalWolves = players.filter(
-    (p) => p.status === 'alive' && nightActionRequest?.wolfAllies?.some((a) => a.seatNumber === p.seatNumber)
-  ).length || nightActionRequest?.wolfAllies?.length || 1;
+  const totalWolves = Object.keys(wolfVotes || {}).length || 1;
   const votedCount = Object.values(wolfVotes || {}).filter((v) => v !== undefined).length;
 
   const handleConfirmClick = () => {

@@ -3,12 +3,15 @@
  * AdminDashboard — 管理员日志复盘面板
  * ============================================================================
  *
- * 功能：
- *   1. 从后端拉取 MongoDB 数据
- *   2. 渲染全局日志的时间轴复盘
- *   3. 每条日志高亮显示当时的 nightActionOrderSnapshot
- *   4. 支持按房间码、时间范围、动作类型、阶段、操作人筛选
- *   5. 支持分页浏览
+ * 架构说明：
+ *   1. 从后端拉取 MongoDB 数据并渲染全局日志的时间轴复盘
+ *   2. 每条日志高亮显示当时的夜间行动顺序快照
+ *   3. 支持按房间码、时间范围、动作类型、阶段、操作人筛选
+ *   4. 支持分页浏览
+ *
+ * 设计原则：
+ *   - 鉴权后才能查看数据，密钥本地管理
+ *   - 筛选条件组合查询，分页状态与服务端同步
  * ============================================================================
  */
 
@@ -21,6 +24,7 @@ import { ROLE_META, PHASE_NAMES } from '@langrensha/shared';
 // 动作类型中文名映射
 // ============================================================================
 
+/** 动作类型中文名映射 */
 const ACTION_TYPE_NAMES: Record<ActionType, string> = {
   PLAYER_JOIN: '玩家加入',
   PLAYER_LEAVE: '玩家离开',
@@ -45,7 +49,6 @@ const ACTION_TYPE_NAMES: Record<ActionType, string> = {
   HUNTER_GUN: '猎人开枪',
   WOLF_KING_GUN: '狼王开枪',
   IDIOT_REVEAL: '白痴翻牌',
-  DEATH_SKILL_SKIP: '跳过死亡技能',
   JUDGE_OVERRIDE_SETTLEMENT: '法官改判',
   JUDGE_FORCE_NEXT_PHASE: '法官强制下一阶段',
   JUDGE_PAUSE: '法官暂停',
@@ -146,9 +149,7 @@ const FILTER_PHASES: GamePhase[] = [
   'DAY_INTERRUPT', 'PK_VOTE', 'GAME_OVER',
 ];
 
-// ============================================================================
-// AdminDashboard 组件
-// ============================================================================
+/** 管理员日志复盘面板，提供全局日志时间轴、筛选和分页浏览 */
 
 const AdminDashboard: React.FC = () => {
   const {
@@ -184,7 +185,7 @@ const AdminDashboard: React.FC = () => {
     if (!isConnected) {
       connect(getWsUrl());
     }
-  }, [isConnected, connect]);
+  }, []);
 
   // 同步服务端分页状态
   useEffect(() => {

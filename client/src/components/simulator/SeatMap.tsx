@@ -1,3 +1,20 @@
+/**
+ * ============================================================================
+ * SeatMap — 模拟器环形座位图
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 环形排列座位，响应式适配容器尺寸
+ *   2. 每个座位显示角色名、昵称、阵营色条和死亡标记
+ *   3. 当前行动角色高亮脉冲动画
+ *   4. 底部统计栏显示存活/死亡/阵营人数
+ *
+ * 设计原则：
+ *   - 使用 React.memo 优化座位和统计栏的渲染性能
+ *   - LOBBY 阶段隐藏角色信息（服务器默认角色无意义）
+ * ============================================================================
+ */
+
 import React, { useMemo, useRef, useState, useEffect, useCallback } from 'react';
 import { useSimulatorStore } from './useSimulatorStore';
 import { ROLE_META, PHASE_NAMES, isEvilRole, isGodRole, type RoleId, type Player } from '@langrensha/shared';
@@ -192,9 +209,7 @@ const StatsBar = React.memo(function StatsBar({ players, isLobby }: StatsBarProp
   );
 });
 
-// ============================================================================
-// SeatMap 主组件
-// ============================================================================
+/** 环形座位图主组件，展示所有玩家座位和法官标识 */
 
 const SeatMap = React.memo(function SeatMap() {
   const connections = useSimulatorStore(s => s.connections);

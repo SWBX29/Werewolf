@@ -1,12 +1,24 @@
+/**
+ * ============================================================================
+ * NightWaiting — 夜间等待界面
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 非行动玩家看到的统一等待界面
+ *   2. 当自身有已行动的技能时，额外显示已行动技能的释放信息
+ *
+ * 设计原则：
+ *   - 无论真实玩家行动还是死亡角色的时间模拟，动画完全一致
+ *   - 存活玩家可见当前行动角色名，死亡玩家仅见通用提示
+ * ============================================================================
+ */
+
 import { useGameStore } from '../../../useGameStore';
 import { ROLE_META } from '@langrensha/shared';
 import type { RoleId, NightActionData } from '@langrensha/shared';
 import CountdownTimer from '../CountdownTimer';
 
-/**
- * 渲染已行动技能的释放信息
- * 当玩家自己已经提交了夜间行动、正在等待其他角色行动时显示
- */
+/** 渲染已行动技能的释放信息，当玩家已提交夜间行动、正在等待其他角色时显示 */
 export function MyActionInfo({ action }: { action: NightActionData }) {
   const players = useGameStore((s) => s.playerState?.players) ?? [];
   const roleName = ROLE_META[action.roleId as RoleId]?.name ?? '未知角色';
@@ -89,11 +101,7 @@ export function MyActionInfo({ action }: { action: NightActionData }) {
   );
 }
 
-/**
- * 夜间等待动画 — 非行动玩家看到的统一等待界面
- * 关键：无论真实玩家行动还是死亡角色的时间模拟，动画完全一致
- * 当自身有已经行动的技能时，额外显示已行动技能的释放信息
- */
+/** 夜间等待界面，非行动玩家看到的统一等待动画 */
 export default function NightWaiting() {
   const playerState = useGameStore((s) => s.playerState);
   const phaseTimeRemaining = useGameStore((s) => s.phaseTimeRemaining);
@@ -104,8 +112,8 @@ export default function NightWaiting() {
   const myPlayer = playerState?.players.find((p) => p.id === playerState?.myPlayerId);
   const isAlive = myPlayer?.status === 'alive';
 
-  // Bug 20 修复：只有存活玩家才能看到当前行动角色名，死亡玩家看到通用提示
-  // 这防止信息泄露，避免死亡玩家知道当前哪个角色在行动
+  // 只有存活玩家才能看到当前行动角色名，死亡玩家看到通用提示
+  // 防止信息泄露，避免死亡玩家知道当前哪个角色在行动
   let actingRoleName = '神秘角色';
   if (isAlive && currentNightRole) {
     actingRoleName = ROLE_META[currentNightRole]?.name ?? '神秘角色';

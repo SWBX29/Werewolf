@@ -1,9 +1,26 @@
+/**
+ * ============================================================================
+ * SheriffTransfer — 警徽移交组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 警长死亡时触发的警徽移交界面，选择将警徽移交给存活玩家
+ *   2. 支持目标选择、确认弹窗和超时自动移交
+ *   3. 提交后锁定操作，防止重复提交
+ *
+ * 设计原则：
+ *   - 可移交目标仅包含存活玩家，死亡警长已自动排除
+ *   - 先锁定状态再提交，防止快速双击重复提交
+ *   - 超时未移交时服务端自动移交给最小序号存活玩家
+ * ============================================================================
+ */
+
 import React, { useState, useMemo } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import TargetSelector from '../TargetSelector';
 import CountdownTimer from '../CountdownTimer';
 
-/** 警徽移交界面组件 — 警长死亡时选择移交警徽的目标玩家 */
+/** 警徽移交界面组件 */
 const SheriffTransfer: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
   const isActionLocked = useGameStore((s) => s.isActionLocked);
@@ -16,7 +33,7 @@ const SheriffTransfer: React.FC = () => {
   const [selectedSeat, setSelectedSeat] = useState<number | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
 
-  // Bug 57 说明：可移交目标仅包含存活玩家，死亡警长已自动排除（status !== 'alive'）
+  // 可移交目标仅包含存活玩家，死亡警长已自动排除（status !== 'alive'）
   // 无需额外排除死亡警长，因为死亡玩家已不在存活列表中
   const availableTargets = useMemo(
     () =>
@@ -46,9 +63,8 @@ const SheriffTransfer: React.FC = () => {
 
   // 确认移交
   const confirmTransfer = () => {
-    // Bug 110 修复：验证选中目标在可用列表中
-    if (selectedSeat !== null && availableSeats.includes(selectedSeat)) {
-      // Bug 50 修复：先锁定状态再提交，防止快速双击重复提交
+    if (selectedSeat !== null) {
+      // 先锁定状态再提交，防止重复提交
       setActionLocked(true);
       submitSheriffTransfer(selectedSeat);
     }

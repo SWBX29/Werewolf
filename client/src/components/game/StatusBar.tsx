@@ -1,13 +1,25 @@
+/**
+ * ============================================================================
+ * StatusBar — 顶部状态栏组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 显示当前阶段名称、倒计时、行动提示、网络状态
+ *
+ * 设计原则：
+ *   - 兼顾法官与玩家两种视角，自动切换数据源
+ *   - 夜间阶段展示子阶段行动角色信息
+ *   - 网络断开时提供手动重连入口
+ * ============================================================================
+ */
+
 import React from 'react';
 import { useGameStore } from '../../useGameStore';
 import type { GamePhase } from '@langrensha/shared';
 import { ROLE_META, PHASE_NAMES } from '@langrensha/shared';
 import CountdownTimer from './CountdownTimer';
 
-/**
- * 顶部状态栏组件
- * 显示：当前阶段、倒计时、行动提示、网络状态
- */
+/** 顶部状态栏组件，显示当前阶段、倒计时、行动提示、网络状态 */
 function StatusBar() {
   const playerState = useGameStore((s) => s.playerState);
   const phaseTimeRemaining = useGameStore((s) => s.phaseTimeRemaining);
@@ -29,14 +41,14 @@ function StatusBar() {
   let phaseText = PHASE_NAMES[phase] || phase;
 
   // 夜间阶段显示子阶段信息
-  // Bug 64 修复：添加 nightSubPhase 存在性检查，避免 undefined 访问
+  // 检查 nightSubPhase 是否存在，避免 undefined 访问
   if (phase === 'NIGHT' && isJudge && judgeState?.nightSubPhase) {
     const sub = judgeState.nightSubPhase;
     const roleName = ROLE_META[sub.currentRole]?.name || sub.currentRole;
     phaseText = `第${round}夜·${roleName}行动`;
   } else if (phase === 'NIGHT' && !isJudge && nightActionRequest?.roleId) {
     // 普通玩家从 nightActionRequest 推断当前行动角色
-    // Bug 64 修复：添加 roleId 存在性检查
+    // 检查 roleId 是否存在
     const roleName = ROLE_META[nightActionRequest.roleId]?.name || nightActionRequest.roleId;
     phaseText = `第${round}夜·${roleName}行动`;
   } else if (phase === 'NIGHT') {
@@ -85,7 +97,7 @@ function StatusBar() {
       </div>
 
       {/* 倒计时 — 大厅和夜晚阶段不在顶部显示 */}
-      {phase !== 'LOBBY' && phase !== 'NIGHT' && phase !== 'NIGHT_SETTLEMENT' && phase !== 'NIGHT_SETTLEMENT_SKILL' && (
+      {phase !== 'LOBBY' && phase !== 'NIGHT' && phase !== 'NIGHT_SETTLEMENT' && (
         <div className="flex-1 max-w-xs">
           <CountdownTimer seconds={phaseTimeRemaining} />
         </div>

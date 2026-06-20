@@ -183,6 +183,7 @@ function getBillingStatus(
 // 组件实现
 // ============================================================================
 
+/** 语音信息面板组件，显示完整的语音连接状态、网络质量、设备信息和计费提示 */
 export default function VoiceInfoPanel({ onClose }: VoiceInfoPanelProps) {
   const {
     connectionState,

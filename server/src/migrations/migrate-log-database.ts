@@ -1,19 +1,19 @@
 /**
  * ============================================================================
- * 狼人杀联机游戏 — 日志数据库迁移脚本
+ * 日志数据库迁移 — 狼人聊天消息与日志格式迁移
  * ============================================================================
  *
- * 迁移任务：
+ * 架构说明：
  *   1. 将 Room 文档中的 wolfChatMessages 数组迁移到 wolf_chat_logs 集合
  *   2. 将 game_logs 中 Map 类型的 detail 字段转换为普通对象
  *
+ * 设计原则：
+ *   - 幂等：可安全重复运行，已迁移的数据不会被重复处理
+ *   - 批量处理：每批 100 条文档，避免内存溢出
+ *   - 完整的进度日志和错误处理
+ *
  * 运行方式：
  *   npx tsx server/src/migrations/migrate-log-database.ts
- *
- * 特性：
- *   - 幂等：可安全重复运行
- *   - 批量处理：每批 100 条文档
- *   - 完整的进度日志和错误处理
  * ============================================================================
  */
 
@@ -21,30 +21,6 @@ import mongoose from 'mongoose';
 import { RoomModel, GameLogModel, WolfChatLogModel } from '../models.js';
 
 const BATCH_SIZE = 100;
-
-let migrationRunning = false;
-
-function convertMapToObjectRecursive(obj: unknown): unknown {
-  if (obj instanceof Map) {
-    const result: Record<string, unknown> = {};
-    for (const [key, value] of obj.entries()) {
-      result[key] = convertMapToObjectRecursive(value);
-    }
-    return result;
-  }
-  if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-    const result: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(obj as Record<string, unknown>)) {
-      if (key.startsWith('$')) continue;
-      result[key] = convertMapToObjectRecursive(value);
-    }
-    return result;
-  }
-  if (Array.isArray(obj)) {
-    return obj.map(convertMapToObjectRecursive);
-  }
-  return obj;
-}
 
 /**
  * 迁移任务 1：将 Room 文档中的 wolfChatMessages 迁移到 wolf_chat_logs 集合
@@ -214,7 +190,8 @@ async function convertGameLogDetailMapToObject(): Promise<void> {
       for (const doc of docs) {
         const detail = doc.get('detail');
         if (detail instanceof Map) {
-          const plainObj = convertMapToObjectRecursive(detail);
+          // 将 Map 转换为普通对象
+          const plainObj = Object.fromEntries(detail);
 
           await gameLogsCollection.updateOne(
             { _id: doc._id },
@@ -257,8 +234,17 @@ async function convertGameLogDetailMapToObject(): Promise<void> {
       for (const doc of docs) {
         let detail = doc.detail;
 
+        // 如果 detail 是 Map 实例（在原生驱动中可能以对象形式存在）
         if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
-          const cleanDetail = convertMapToObjectRecursive(detail);
+          // 移除 Map 标记字段，保留实际数据
+          const cleanDetail: Record<string, unknown> = {};
+          for (const [key, value] of Object.entries(detail)) {
+            // 跳过 Mongoose 内部标记字段
+            if (key.startsWith('$')) {
+              continue;
+            }
+            cleanDetail[key] = value;
+          }
 
           await gameLogsCollection.updateOne(
             { _id: doc._id },
@@ -286,52 +272,17 @@ async function convertGameLogDetailMapToObject(): Promise<void> {
 
 /**
  * 执行全部迁移任务
+ *
+ * 按顺序执行：狼人聊天消息迁移 → 日志格式转换。
+ * 任一任务失败将中断后续任务并抛出异常。
  */
 export async function runMigration(): Promise<void> {
-  // Bug 155: 并发保护，防止多个迁移进程同时执行
-  if (migrationRunning) {
-    console.error('[迁移] 另一个迁移任务正在执行中，跳过本次执行');
-    return;
-  }
-  migrationRunning = true;
-
   console.log('========================================');
   console.log('  日志数据库迁移脚本');
   console.log(`  开始时间: ${new Date().toISOString()}`);
   console.log('========================================');
 
   try {
-    // Bug 153: 检查目标集合是否已存在，避免重复创建
-    const db = mongoose.connection.db!;
-    const collections = await db.listCollections().toArray();
-    const existingNames = new Set(collections.map((c) => c.name));
-
-    if (!existingNames.has('wolf_chat_logs')) {
-      console.log('[迁移] wolf_chat_logs 集合不存在，将在首次写入时自动创建');
-    } else {
-      console.log('[迁移] wolf_chat_logs 集合已存在');
-    }
-
-    if (!existingNames.has('game_logs')) {
-      console.log('[迁移] game_logs 集合不存在，将在首次写入时自动创建');
-    } else {
-      console.log('[迁移] game_logs 集合已存在');
-      // 检查已有索引，避免重复创建
-      const existingIndexes = await db.collection('game_logs').indexes();
-      const indexNames = new Set(existingIndexes.map((idx: any) => idx.name));
-      const expectedIndexes = [
-        'roomCode_1_timestamp_-1',
-        'gameId_1_timestamp_-1',
-        'actionType_1_timestamp_-1',
-        'timestamp_-1',
-        'roomCode_1_round_1_phase_1',
-      ];
-      const missingIndexes = expectedIndexes.filter((name) => !indexNames.has(name));
-      if (missingIndexes.length > 0) {
-        console.log(`[迁移] game_logs 缺少索引: ${missingIndexes.join(', ')}，将在 Mongoose 同步时自动创建`);
-      }
-    }
-
     // 迁移任务 1：wolfChatMessages → wolf_chat_logs
     await migrateWolfChatMessages();
 
@@ -348,7 +299,5 @@ export async function runMigration(): Promise<void> {
   } catch (error) {
     console.error('[迁移] 发生错误:', error);
     throw error;
-  } finally {
-    migrationRunning = false;
   }
 }

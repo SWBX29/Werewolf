@@ -1,11 +1,24 @@
+/**
+ * ============================================================================
+ * NightmarePanel — 噩梦之影行动面板
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 噩梦之影选择恐惧目标，使其当夜技能失效
+ *
+ * 设计原则：
+ *   - 不可恐惧自己，不可重复恐惧同一人
+ *   - 可恐惧狼人阵营角色
+ *   - 恐惧需二次确认
+ * ============================================================================
+ */
+
 import { useState } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import TargetSelector from '../TargetSelector';
 import ConfirmDialog from '../ConfirmDialog';
 
-/**
- * 噩梦之影行动面板 — 恐惧目标选择
- */
+/** 噩梦之影行动面板，选择恐惧目标 */
 export default function NightmarePanel() {
   const playerState = useGameStore((s) => s.playerState);
   const isActionLocked = useGameStore((s) => s.isActionLocked);

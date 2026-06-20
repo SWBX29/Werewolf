@@ -1,3 +1,20 @@
+/**
+ * ============================================================================
+ * EventLog — 模拟器事件日志面板
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 按时间轴展示模拟器产生的系统/行动/结果/法官/错误事件
+ *   2. 支持按分类筛选
+ *   3. 面板可折叠，高度可拖拽调整
+ *   4. 新事件自动滚动到底部
+ *
+ * 设计原则：
+ *   - 纯展示组件，从 useSimulatorStore 读取事件数据
+ *   - 使用等宽字体便于阅读时间戳和阶段标签
+ * ============================================================================
+ */
+
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useSimulatorStore } from './useSimulatorStore';
 import { PHASE_NAMES } from '@langrensha/shared';
@@ -22,6 +39,7 @@ const CATEGORY_COLORS: Record<SimEvent['category'], string> = {
   error: 'bg-red-500/20 text-red-300',
 };
 
+/** 模拟器事件日志面板，按时间轴展示并支持分类筛选 */
 export default function EventLog() {
   const eventLog = useSimulatorStore((s) => s.eventLog);
 
@@ -36,7 +54,7 @@ export default function EventLog() {
   const filteredEvents =
     filter === 'all' ? eventLog : eventLog.filter((e) => e.category === filter);
 
-  // Auto-scroll to bottom on new events
+  // 新事件自动滚动到底部
   useEffect(() => {
     if (!collapsed && listRef.current) {
       listRef.current.scrollTop = listRef.current.scrollHeight;
@@ -74,7 +92,7 @@ export default function EventLog() {
       className="flex flex-col border-t border-gray-700 bg-gray-900/95 select-none shrink-0"
       style={{ height: collapsed ? undefined : height, minHeight: collapsed ? undefined : 80 }}
     >
-      {/* Resize handle - always visible when not collapsed */}
+      {/* 拖拽调整高度手柄 — 非折叠时始终可见 */}
       {!collapsed && (
         <div
           className="h-1.5 cursor-ns-resize hover:bg-blue-500/40 active:bg-blue-500/60 transition-colors shrink-0"
@@ -82,7 +100,7 @@ export default function EventLog() {
         />
       )}
 
-      {/* Header */}
+      {/* 头部 */}
       <div
         className="flex items-center gap-2 px-3 py-1.5 bg-gray-800/80 border-b border-gray-700 cursor-pointer shrink-0"
         onClick={() => setCollapsed((c) => !c)}
@@ -95,7 +113,7 @@ export default function EventLog() {
         </span>
       </div>
 
-      {/* Filter buttons */}
+      {/* 分类筛选按钮 */}
       {!collapsed && (
         <div className="flex gap-1 px-3 py-1.5 border-b border-gray-700/50 shrink-0">
           {(Object.keys(CATEGORY_LABELS) as CategoryFilter[]).map((cat) => (
@@ -117,7 +135,7 @@ export default function EventLog() {
         </div>
       )}
 
-      {/* Event list */}
+      {/* 事件列表 */}
       {!collapsed && (
         <div
           ref={listRef}

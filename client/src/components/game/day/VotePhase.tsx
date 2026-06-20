@@ -1,3 +1,20 @@
+/**
+ * ============================================================================
+ * VotePhase — 放逐投票阶段组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 管理放逐投票阶段的完整交互，包括投票选择、弃权、PK投票
+ *   2. 集成投票结果展示（票数柱状图、出局信息、身份揭示）
+ *   3. 支持白狼王自爆操作和投票阶段全体发言
+ *
+ * 设计原则：
+ *   - PK阶段仅限PK候选人为投票目标，使用 !== undefined 检查避免空数组回退
+ *   - 投票阶段允许全体存活玩家发言
+ *   - 白痴翻牌后失去投票权，不显示投票操作
+ * ============================================================================
+ */
+
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import { ROLE_META } from '@langrensha/shared';
@@ -5,6 +22,7 @@ import type { RoleId } from '@langrensha/shared';
 import TargetSelector from '../TargetSelector';
 import CountdownTimer from '../CountdownTimer';
 
+/** 放逐投票阶段组件 */
 const VotePhase: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
   const voteResult = useGameStore((s) => s.voteResult);
@@ -24,10 +42,7 @@ const VotePhase: React.FC = () => {
   const [whiteWolfTarget, setWhiteWolfTarget] = useState<number | null>(null);
   const [showWhiteWolfConfirm, setShowWhiteWolfConfirm] = useState(false);
 
-  // Bug 88 修复：投票防重复提交
-  const [isSubmitting, setIsSubmitting] = useState(false);
-
-  // Bug 5 修复：投票阶段全体发言
+  // 投票阶段全体发言
   const [speechInput, setSpeechInput] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -45,7 +60,7 @@ const VotePhase: React.FC = () => {
     .map((p) => p.seatNumber);
 
   // PK阶段仅限PK候选人为投票目标
-  // Bug 6 修复：使用 !== undefined 检查而非 .length，避免空数组 fallback 到过期数据
+  // 使用 !== undefined 检查而非 .length，避免空数组 fallback 到过期数据
   const pkCandidatesFromState = playerState.pkCandidates;
   const effectiveTargets = isPK && pkCandidatesFromState !== undefined
     ? voteTargets.filter((s) => pkCandidatesFromState.includes(s))
@@ -82,10 +97,8 @@ const VotePhase: React.FC = () => {
   };
 
   const confirmVote = () => {
-    if (isSubmitting) return;
-    setIsSubmitting(true);
-    setActionLocked(true);
     submitVote(confirmTarget);
+    setActionLocked(true);
     setShowConfirm(false);
   };
 
@@ -114,13 +127,12 @@ const VotePhase: React.FC = () => {
 
   // ---- 投票结果数据计算 ----
   const voteData = useMemo(() => {
-    if (!voteResult || !voteResult.votes || typeof voteResult.votes !== 'object') return null;
+    if (!voteResult) return null;
 
     const { votes, eliminated, isPK: isPKResult, pkCandidates } = voteResult;
 
     // 所有投票条目
     const voteEntries = Object.entries(votes)
-      .filter(([, target]) => target !== undefined)
       .map(([voter, target]) => ({
         voter: Number(voter),
         target: target as number | null,
@@ -289,7 +301,7 @@ const VotePhase: React.FC = () => {
         )}
       </div>
 
-      {/* Bug 5 修复：投票阶段全体发言区域 */}
+      {/* 投票阶段全体发言区域 */}
       {!voteResult && myPlayer?.status === 'alive' && !myPlayer?.isMuted && (
         <div className="card border-amber-800/30 bg-night-900/50 p-3 space-y-2">
           <div className="flex gap-2">
@@ -458,7 +470,7 @@ const VotePhase: React.FC = () => {
   );
 };
 
-/** 身份揭示子组件 */
+/** 身份揭示子组件 — 投票出局后展示阵营或角色信息 */
 const IdentityReveal: React.FC<{ seat: number; revealMode: 'NONE' | 'FACTION' | 'ROLE' }> = ({ seat, revealMode }) => {
   const playerState = useGameStore((s) => s.playerState);
   const dayAnnouncement = useGameStore((s) => s.dayAnnouncement);

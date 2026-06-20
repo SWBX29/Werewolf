@@ -1,19 +1,32 @@
+/**
+ * ============================================================================
+ * simulator/websocket — 模拟器 WebSocket 通信工具
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 创建和管理模拟器 WebSocket 连接
+ *   2. 消息发送与解析
+ *   3. 心跳保活机制（PING/PONG + 超时断连）
+ *   4. 连接地址推导
+ *
+ * 设计原则：
+ *   - 纯工具函数，无状态副作用
+ *   - 心跳超时自动关闭连接，由上层 store 负责重连
+ * ============================================================================
+ */
+
 import type { ClientMessage, ServerMessage } from '@langrensha/shared';
 
 const HEARTBEAT_INTERVAL = 30000;
 const HEARTBEAT_TIMEOUT = 10000;
 
-/**
- * Create a new WebSocket connection to the game server
- */
+/** 创建新的 WebSocket 连接 */
 export function createConnection(serverUrl: string): WebSocket {
   const ws = new WebSocket(serverUrl);
   return ws;
 }
 
-/**
- * Send a client message through a WebSocket connection
- */
+/** 通过 WebSocket 连接发送客户端消息 */
 export function sendMessage(ws: WebSocket | null, message: ClientMessage): void {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
     console.warn('[Simulator] Cannot send message: WebSocket not open', message);
@@ -23,15 +36,18 @@ export function sendMessage(ws: WebSocket | null, message: ClientMessage): void 
 }
 
 /**
- * Setup heartbeat (PING) for a WebSocket connection
- * Returns the interval ID for cleanup
+ * 设置心跳保活机制（PING/PONG）
+ * 返回定时器 ID 和更新最近 PONG 时间的函数
  */
-export function setupHeartbeat(ws: WebSocket): ReturnType<typeof setInterval> {
+export function setupHeartbeat(ws: WebSocket): {
+  interval: ReturnType<typeof setInterval>;
+  updatePongTime: () => void;
+} {
   let lastPongTime = Date.now();
 
-  return setInterval(() => {
+  const interval = setInterval(() => {
     if (ws.readyState === WebSocket.OPEN) {
-      // Bug 164 修复：检查上次 PONG 是否超时
+      // 检查上次 PONG 是否超时
       if (Date.now() - lastPongTime > HEARTBEAT_INTERVAL + HEARTBEAT_TIMEOUT) {
         console.warn('[Simulator] Heartbeat timeout, closing connection');
         ws.close(4000, 'Heartbeat timeout');
@@ -40,11 +56,15 @@ export function setupHeartbeat(ws: WebSocket): ReturnType<typeof setInterval> {
       ws.send(JSON.stringify({ type: 'PING' }));
     }
   }, HEARTBEAT_INTERVAL);
+
+  const updatePongTime = () => {
+    lastPongTime = Date.now();
+  };
+
+  return { interval, updatePongTime };
 }
 
-/**
- * Close a WebSocket connection gracefully
- */
+/** 优雅关闭 WebSocket 连接 */
 export function closeConnection(ws: WebSocket | null): void {
   if (!ws) return;
   if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
@@ -52,9 +72,7 @@ export function closeConnection(ws: WebSocket | null): void {
   }
 }
 
-/**
- * Parse an incoming WebSocket message as ServerMessage
- */
+/** 解析 WebSocket 收到的消息为 ServerMessage */
 export function parseMessage(data: string): ServerMessage | null {
   try {
     return JSON.parse(data) as ServerMessage;
@@ -65,8 +83,8 @@ export function parseMessage(data: string): ServerMessage | null {
 }
 
 /**
- * Get the WebSocket URL for the simulator
- * Uses the same logic as the main game client
+ * 获取模拟器 WebSocket 地址
+ * 与主游戏客户端使用相同的地址推导逻辑
  */
 export function getSimulatorWsUrl(customUrl?: string): string {
   if (customUrl) return customUrl;

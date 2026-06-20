@@ -1,7 +1,25 @@
+/**
+ * ============================================================================
+ * IdiotReveal — 白痴翻牌技能组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 白痴被投票出局时触发的翻牌免死动画，展示身份并提示失去投票权
+ *   2. 通过翻牌动画（翻转卡片效果）增强视觉体验
+ *   3. 翻牌完成后可手动关闭，之后不再显示
+ *
+ * 设计原则：
+ *   - 翻牌状态由服务端通过 playerState.idiotRevealed 控制
+ *   - 动画分三阶段：idle → flipping → revealed，翻牌后 700ms 显示结果
+ *   - 翻牌后失去投票权但可继续参与讨论
+ * ============================================================================
+ */
+
 import React, { useState, useEffect } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import { ROLE_META } from '@langrensha/shared';
 
+/** 白痴翻牌技能组件 */
 const IdiotReveal: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
 

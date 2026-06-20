@@ -4,21 +4,14 @@
  * ============================================================================
  *
  * 架构说明：
- *   本组件是玩家游玩界面的顶层容器，负责：
  *   1. 根据游戏阶段动态切换主面板内容
  *   2. 渲染通用布局（状态栏 + 主面板 + 底部信息栏）
  *   3. 管理角色揭示、观战模式、申诉等全局覆盖层
  *
- * 布局结构：
- *   ┌──────────────────────────────────────────┐
- *   │  [StatusBar]  阶段名 | 倒计时 | 行动提示  │
- *   ├──────────────────────────────────────────┤
- *   │                                            │
- *   │   [主面板]  根据阶段动态切换                │
- *   │                                            │
- *   ├──────────────────────────────────────────┤
- *   │  [底部栏]  存活人数 | 座位表 | 设置        │
- *   └──────────────────────────────────────────┘
+ * 设计原则：
+ *   - 阶段切换使用懒加载减少首屏体积
+ *   - 白天/夜晚背景样式自动切换
+ *   - 死亡玩家自动进入观战模式
  * ============================================================================
  */
 
@@ -95,7 +88,7 @@ const GameView: React.FC = () => {
     if (!enableVoice || !playerState) return;
 
     const phase = playerState.phase;
-    const isNightPhase = ['NIGHT', 'NIGHT_SETTLEMENT', 'NIGHT_SETTLEMENT_SKILL', 'PRE_NIGHT'].includes(phase);
+    const isNightPhase = ['NIGHT', 'NIGHT_SETTLEMENT', 'PRE_NIGHT'].includes(phase);
     const isDayPhase = ['DAY_ANNOUNCE', 'DAY_SPEECH', 'PRE_VOTE_WAIT', 'DAY_VOTE', 'PK_VOTE', 'SHERIFF_ELECTION', 'SHERIFF_TRANSFER', 'DAY_SETTLEMENT', 'DAY_INTERRUPT'].includes(phase);
 
     // 定时器引用（用于 cleanup）
@@ -146,7 +139,7 @@ const GameView: React.FC = () => {
         clearTimeout(hintTimer);
       }
     };
-  }, [playerState?.phase, nightVoiceMode, connectionState, enableVoice, joinVoiceRoom, setNightVoiceMode, setVoiceStatusHint]);
+  }, [playerState?.phase, nightVoiceMode, connectionState, enableVoice]);
 
   // 房间解散 → 显示解散界面（优先级最高）
   if (roomDissolvedData) {
@@ -261,8 +254,8 @@ const GameView: React.FC = () => {
     );
   };
 
-  // Bug 21 修复：背景样式根据阶段切换，白天使用明亮的背景
-  const isNight = ['NIGHT', 'NIGHT_SETTLEMENT', 'NIGHT_SETTLEMENT_SKILL', 'PRE_NIGHT'].includes(playerState.phase);
+  // 背景样式根据阶段切换，白天使用明亮的背景
+  const isNight = ['NIGHT', 'NIGHT_SETTLEMENT', 'PRE_NIGHT'].includes(playerState.phase);
   const bgClass = isNight ? 'bg-night-phase' : 'bg-gradient-to-b from-amber-950/50 to-night-950';
 
   return (
@@ -805,7 +798,7 @@ const PreNightWait: React.FC = () => {
 };
 
 // ============================================================================
-// 投票前等待面板（Bug 4+6 修复）
+// 投票前等待面板
 // 所有发言结束后、投票开始前的等待阶段
 // 骑士可以在此阶段发动决斗
 // ============================================================================

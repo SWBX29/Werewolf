@@ -1,10 +1,27 @@
+/**
+ * ============================================================================
+ * DayAnnounce — 天亮公告组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 展示夜晚阶段的结算结果（死亡玩家、禁言玩家）
+ *   2. 全屏覆盖层形式，5秒后自动关闭或点击任意处关闭
+ *
+ * 设计原则：
+ *   - 公告信息来源于全局状态 dayAnnouncement
+ *   - 自动关闭通过 useEffect + setTimeout 实现，组件卸载时清理定时器
+ * ============================================================================
+ */
+
 import React, { useEffect } from 'react';
 import { useGameStore } from '../../../useGameStore';
 
+/** 天亮公告组件 */
 const DayAnnounce: React.FC = () => {
   const dayAnnouncement = useGameStore((s) => s.dayAnnouncement);
   const dismissDayAnnouncement = useGameStore((s) => s.dismissDayAnnouncement);
 
+  // 公告到达后启动5秒自动关闭定时器
   useEffect(() => {
     if (!dayAnnouncement) return;
     const timer = setTimeout(() => {

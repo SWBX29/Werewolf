@@ -3,7 +3,7 @@
  * RoomSetupPanel — 模拟器房间配置面板
  * ============================================================================
  *
- * 功能：
+ * 架构说明：
  *   1. 法官昵称输入
  *   2. 游戏模式选择（上帝法官 / 系统跑团）
  *   3. 村规配置（复用 RoomConfigPanel）
@@ -23,9 +23,7 @@ import RoomConfigPanel, { ROLE_ITEMS } from '../RoomConfigPanel';
 import type { RoleId, RuleConfig, GameMode, NightActionOrderPreset } from '@langrensha/shared';
 import { NIGHT_ACTION_ORDER_PRESETS, createDefaultRuleConfig } from '@langrensha/shared';
 
-// ============================================================================
-// RoomSetupPanel 组件
-// ============================================================================
+/** 模拟器房间配置面板，配置法官、村规和模拟玩家后创建房间 */
 
 const RoomSetupPanel: React.FC = () => {
   // ---- 本地状态 ----
@@ -79,7 +77,6 @@ const RoomSetupPanel: React.FC = () => {
   // ---- 角色数量调整 ----
   const adjustRole = (roleId: RoleId, delta: number) => {
     const current = ruleConfig.roleDistribution[roleId] || 0;
-    // Bug 119 修复：确保角色数量最小为 0
     const newVal = Math.max(0, current + delta);
     const newDistribution = { ...ruleConfig.roleDistribution, [roleId]: newVal };
 
@@ -113,15 +110,11 @@ const RoomSetupPanel: React.FC = () => {
   const moveNightAction = (fromIndex: number, toIndex: number) => {
     const order = [...ruleConfig.nightActionOrder];
     const [moved] = order.splice(fromIndex, 1);
-    // Bug 121 修复：噩梦之影不能排在最后（必须在其他角色之后行动）
+    // 噩梦之影不能排在最后
     if (moved === 'nightmare_shadow' && toIndex >= order.length) {
       return;
     }
     order.splice(toIndex, 0, moved);
-    // 再次检查：如果移动后 nightmare_shadow 仍在最后，撤销
-    if (order[order.length - 1] === 'nightmare_shadow') {
-      return;
-    }
     setRuleConfig({ ...ruleConfig, nightActionOrder: order, nightActionOrderPreset: 'chaos' });
   };
 
@@ -171,9 +164,6 @@ const RoomSetupPanel: React.FC = () => {
     if (ruleConfig.playerCount < 6 || ruleConfig.playerCount > 18) return;
     if (evilCount < 1 || goodCount < 3) return;
     if (playerNames.length !== ruleConfig.playerCount) return;
-    // Bug 120 修复：验证角色总人数与玩家数一致
-    const roleTotal = evilCount + goodCount;
-    if (roleTotal !== ruleConfig.playerCount) return;
 
     // 强制 enableVoice = false
     const finalConfig = { ...ruleConfig, enableVoice: false };
@@ -194,7 +184,6 @@ const RoomSetupPanel: React.FC = () => {
     ruleConfig.playerCount <= 18 &&
     evilCount >= 1 &&
     goodCount >= 3 &&
-    evilCount + goodCount === ruleConfig.playerCount &&
     playerNames.length === ruleConfig.playerCount &&
     playerNames.every((n) => n.trim() !== '');
 

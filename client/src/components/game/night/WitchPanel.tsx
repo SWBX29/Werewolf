@@ -1,11 +1,29 @@
+/**
+ * ============================================================================
+ * WitchPanel — 女巫行动面板
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 分步骤引导女巫使用解药和毒药
+ *   2. 根据规则配置决定是否允许同晚双药和自救
+ *
+ * 设计原则：
+ *   - 解药/毒药分步操作，每步需确认
+ *   - 重连时同步步骤状态
+ *   - 毒药使用需二次确认
+ * ============================================================================
+ */
+
 import { useState, useEffect } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import TargetSelector from '../TargetSelector';
 import ConfirmDialog from '../ConfirmDialog';
 import NightPanelLayout from '../NightPanelLayout';
 
+/** 女巫操作步骤类型 */
 type WitchStep = 'antidote' | 'poison' | 'done';
 
+/** 女巫行动面板，分步骤引导使用解药和毒药 */
 export default function WitchPanel() {
   const playerState = useGameStore((s) => s.playerState);
   const isActionLocked = useGameStore((s) => s.isActionLocked);
@@ -28,7 +46,7 @@ export default function WitchPanel() {
   const [step, setStep] = useState<WitchStep>('antidote');
   const [confirmOpen, setConfirmOpen] = useState(false);
 
-  // Bug 2 修复：使用 useEffect 同步 step 状态，处理重连场景
+  // 使用 useEffect 同步步骤状态，处理重连场景
   useEffect(() => {
     // 根据药水使用状态和当前步骤确定正确的步骤
     if (antidoteUsed && poisonUsed) {
@@ -39,15 +57,14 @@ export default function WitchPanel() {
       // 重连时如果解药未用但步骤是 done，重置为 antidote
       setStep('antidote');
     }
-  }, [antidoteUsed, poisonUsed, step]);
+  }, [antidoteUsed, poisonUsed]);
 
   if (!nightActionRequest) return null;
 
   const werewolfKillTarget = nightActionRequest.werewolfKillTarget;
   const guardProtectTarget = nightActionRequest.guardProtectTarget;
 
-  // Bug 1 修复：正确判断女巫能否自救
-  // 基于 ruleConfig.witchSaveSelf 规则和当前轮次判断
+  // 基于 ruleConfig.witchSaveSelf 规则和当前轮次判断女巫能否自救
   const canSaveSelf = (() => {
     // 如果女巫不是被杀目标，自救问题不适用，返回 true（可以救别人）
     if (werewolfKillTarget !== mySeat) return true;

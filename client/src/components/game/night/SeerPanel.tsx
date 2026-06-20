@@ -1,12 +1,25 @@
+/**
+ * ============================================================================
+ * SeerPanel — 预言家行动面板
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 预言家选择目标查验其阵营
+ *   2. 查验结果实时展示
+ *
+ * 设计原则：
+ *   - 查验需二次确认
+ *   - 结果到达后以醒目样式展示阵营信息
+ * ============================================================================
+ */
+
 import { useState } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import TargetSelector from '../TargetSelector';
 import ConfirmDialog from '../ConfirmDialog';
 import NightPanelLayout from '../NightPanelLayout';
 
-/**
- * 预言家行动面板 — 查验目标阵营
- */
+/** 预言家行动面板，选择目标查验其阵营 */
 export default function SeerPanel() {
   const playerState = useGameStore((s) => s.playerState);
   const isActionLocked = useGameStore((s) => s.isActionLocked);

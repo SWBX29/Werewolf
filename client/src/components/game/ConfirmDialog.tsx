@@ -1,8 +1,29 @@
-import React, { ReactNode, useEffect, useRef } from 'react';
+/**
+ * ============================================================================
+ * ConfirmDialog — 通用二次确认弹窗
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 提供统一的二次确认交互模式，防止误操作
+ *   2. 支持图标、多类型提示信息、自定义按钮样式
+ *   3. 通过 open 属性控制显示/隐藏，无需手动管理挂载
+ *
+ * 设计原则：
+ *   - 纯展示+回调组件，不持有业务状态
+ *   - 支持主色/危险色两种确认按钮风格
+ *   - 背景遮罩带毛玻璃效果，聚焦用户注意力
+ * ============================================================================
+ */
 
+import React, { ReactNode } from 'react';
+
+/** 确认弹窗属性接口 */
 interface ConfirmDialogProps {
+  /** 是否显示弹窗 */
   open: boolean;
+  /** 弹窗标题 */
   title: string;
+  /** 弹窗消息内容 */
   message: string;
   /** 确认按钮标签 */
   confirmLabel?: string;
@@ -22,10 +43,7 @@ interface ConfirmDialogProps {
   zIndex?: number;
 }
 
-/**
- * 通用二次确认弹窗
- * 支持图标、多类型提示、自定义按钮样式
- */
+/** 通用二次确认弹窗，支持图标、多类型提示、自定义按钮样式 */
 function ConfirmDialog({
   open,
   title,
@@ -39,37 +57,13 @@ function ConfirmDialog({
   onCancel,
   zIndex = 40,
 }: ConfirmDialogProps) {
-  const mountedRef = useRef(true);
-  const triggeredRef = useRef(false);
-
-  useEffect(() => {
-    return () => {
-      mountedRef.current = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    triggeredRef.current = false;
-  }, [open]);
-
-  const handleConfirm = () => {
-    if (triggeredRef.current) return;
-    triggeredRef.current = true;
-    if (mountedRef.current) onConfirm();
-  };
-
-  const handleCancel = () => {
-    if (triggeredRef.current) return;
-    triggeredRef.current = true;
-    if (mountedRef.current) onCancel();
-  };
-
   if (!open) return null;
 
+  // 根据按钮风格选择样式类
   const confirmBtnClass = confirmVariant === 'danger' ? 'btn-danger' : 'btn-primary';
 
   return (
-    <div 
+    <div
       className="fixed inset-0 z-${zIndex} flex items-center justify-center bg-black/60 backdrop-blur-sm animate-fade-in-up"
       style={{ zIndex }}
     >
@@ -78,18 +72,18 @@ function ConfirmDialog({
         {icon && (
           <div className="text-4xl">{icon}</div>
         )}
-        
+
         {/* 标题 */}
         <h3 className="text-lg font-bold text-gray-100">{title}</h3>
-        
+
         {/* 消息 */}
         <p className="text-sm text-gray-400">{message}</p>
-        
+
         {/* 额外提示 */}
         {hints && hints.length > 0 && (
           <div className="space-y-1">
             {hints.map((hint, idx) => (
-              <p 
+              <p
                 key={idx}
                 className={`text-xs ${
                   hint.type === 'warning' ? 'text-yellow-400' :
@@ -102,18 +96,18 @@ function ConfirmDialog({
             ))}
           </div>
         )}
-        
+
         {/* 按钮 */}
         <div className="flex gap-3">
           <button
             className="btn-secondary flex-1"
-            onClick={handleCancel}
+            onClick={onCancel}
           >
             {cancelLabel}
           </button>
           <button
             className={`${confirmBtnClass} flex-1`}
-            onClick={handleConfirm}
+            onClick={onConfirm}
           >
             {confirmLabel}
           </button>

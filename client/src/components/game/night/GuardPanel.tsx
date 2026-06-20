@@ -1,11 +1,25 @@
+/**
+ * ============================================================================
+ * GuardPanel — 守卫行动面板
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 守卫选择守护目标或空守
+ *   2. 首夜允许守护自己，后续夜晚不可
+ *
+ * 设计原则：
+ *   - 不可重复守护同一人
+ *   - 守护需二次确认
+ *   - 所有目标被禁用时可跳过守护
+ * ============================================================================
+ */
+
 import { useState } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import TargetSelector from '../TargetSelector';
 import ConfirmDialog from '../ConfirmDialog';
 
-/**
- * 守卫行动面板 — 选择守护目标
- */
+/** 守卫行动面板，选择守护目标 */
 export default function GuardPanel() {
   const playerState = useGameStore((s) => s.playerState);
   const isActionLocked = useGameStore((s) => s.isActionLocked);

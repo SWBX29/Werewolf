@@ -1,6 +1,23 @@
+/**
+ * ============================================================================
+ * TargetSelector — 目标选择器组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 提供统一的夜间行动目标选择交互
+ *   2. 支持禁用目标、自选标记、全局锁定等状态
+ *
+ * 设计原则：
+ *   - 纯展示+回调组件，不持有业务状态
+ *   - 禁用目标显示原因提示
+ *   - 选中状态切换逻辑由父组件管理
+ * ============================================================================
+ */
+
 import React from 'react';
 import type { PlayerDTO } from '@langrensha/shared';
 
+/** 目标选择器属性接口 */
 export interface TargetSelectorProps {
   /** 可选目标座位号列表 */
   targets: number[];
@@ -24,6 +41,7 @@ export interface TargetSelectorProps {
   disabled?: boolean;
 }
 
+/** 目标选择器组件，提供统一的夜间行动目标选择交互 */
 function TargetSelector({
   targets,
   players,

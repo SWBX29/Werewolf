@@ -1,14 +1,20 @@
 /**
  * ============================================================================
- * 狼人杀联机游戏 — 前端入口组件
+ * App — 前端入口组件
  * ============================================================================
  *
- * 功能：
- *   1. 根据路由状态渲染不同的视图组件
- *   2. 初始化 WebSocket 连接
- *   3. 全局错误提示和连接状态指示
+ * 架构说明：
+ *   1. 根据路由状态渲染不同的视图组件（首页/游戏/管理/模拟器）
+ *   2. 初始化 WebSocket 连接并管理连接状态
+ *   3. 全局错误捕获与上报，错误弹窗自动关闭
  *   4. 骨架屏管理 — 首屏加载完成后隐藏
  *   5. 组件预加载 — 首页加载后自动预加载游戏组件
+ *   6. Zego 语音服务初始化与语音房间生命周期管理
+ *
+ * 设计原则：
+ *   - 视图组件按需懒加载，首屏仅加载 HomeView
+ *   - 语音 SDK 延迟到进入游戏时才初始化，避免首屏加载 1.9MB
+ *   - 全局错误自动上报到服务端错误数据库
  * ============================================================================
  */
 
@@ -27,6 +33,7 @@ const SimulatorView = lazy(() => import('./components/SimulatorView'));
 // 组件预加载策略 — 首页加载后自动预加载游戏组件
 // ============================================================================
 
+/** 组件预加载进度跟踪 */
 interface PreloadProgress {
   gameView: boolean;
   nightPanels: boolean;
@@ -35,8 +42,9 @@ interface PreloadProgress {
 }
 
 /**
- * 预加载游戏组件 — 按优先级预加载
+ * 按优先级预加载游戏组件
  * 优先级：GameView → 夜间面板 → 技能组件 → ZEGO SDK
+ * @param onProgress 预加载进度回调
  */
 async function preloadGameComponents(
   onProgress?: (progress: PreloadProgress) => void
@@ -106,6 +114,7 @@ async function preloadGameComponents(
  */
 let _prefetchScheduled = false;
 
+/** 调度非首屏 chunk 预加载（仅执行一次） */
 function prefetchChunks(): void {
   if (_prefetchScheduled) return;
   _prefetchScheduled = true;
@@ -127,7 +136,7 @@ function prefetchChunks(): void {
   }
 }
 
-// 视图切换加载占位
+/** 视图切换加载占位组件 */
 const ViewLoading: React.FC = () => (
   <div className="flex items-center justify-center min-h-screen">
     <div className="flex items-center gap-3 text-gray-400">
@@ -141,6 +150,7 @@ const ViewLoading: React.FC = () => (
 // App 根组件
 // ============================================================================
 
+/** 应用根组件 — 负责视图路由、WebSocket 连接、全局错误处理和语音服务管理 */
 const App: React.FC = () => {
   const currentView = useGameStore((s) => s.currentView);
   const isConnected = useGameStore((s) => s.isConnected);
@@ -171,34 +181,56 @@ const App: React.FC = () => {
     }
   }, []);
 
+  // 全局错误捕获 — 上报至服务端错误数据库
+  useEffect(() => {
+    const handleError = (event: ErrorEvent) => {
+      useGameStore.getState().reportError(
+        'error',
+        event.message,
+        event.error?.stack ?? null,
+        { filename: event.filename, lineno: event.lineno, colno: event.colno },
+      );
+    };
+
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      useGameStore.getState().reportError(
+        'error',
+        reason instanceof Error ? reason.message : String(reason),
+        reason instanceof Error ? reason.stack : null,
+        { eventType: 'unhandledrejection' },
+      );
+    };
+
+    window.addEventListener('error', handleError);
+    window.addEventListener('unhandledrejection', handleUnhandledRejection);
+    return () => {
+      window.removeEventListener('error', handleError);
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
+    };
+  }, []);
+
   // 首屏渲染完成后，隐藏骨架屏并预加载剩余 chunk
   useEffect(() => {
-    // Bug 91-92 修复：保存定时器引用以便清理
-    let skeletonTimer: ReturnType<typeof setTimeout> | null = null;
-    let transitionTimer: ReturnType<typeof setTimeout> | null = null;
-
     // 延迟隐藏骨架屏，确保首屏内容已渲染
     const hideSkeleton = () => {
       const skeleton = document.getElementById('skeleton');
       if (skeleton) {
         skeleton.classList.add('skeleton-hidden');
         // 等待过渡动画完成后移除骨架屏
-        transitionTimer = setTimeout(() => {
+        setTimeout(() => {
           setSkeletonVisible(false);
         }, 300);
       }
     };
 
     // 首屏渲染完成后隐藏骨架屏
-    skeletonTimer = setTimeout(hideSkeleton, 100);
+    const timer = setTimeout(hideSkeleton, 100);
 
     // 触发预加载
     prefetchChunks();
 
-    return () => {
-      if (skeletonTimer) clearTimeout(skeletonTimer);
-      if (transitionTimer) clearTimeout(transitionTimer);
-    };
+    return () => clearTimeout(timer);
   }, []);
 
   // Zego 语音服务：延迟到进入游戏时才初始化，避免首屏加载 1.9MB SDK
@@ -295,20 +327,12 @@ const App: React.FC = () => {
   }, [currentView, roomCode, playerId, nickname, roomDissolvedData, enableVoice]);
 
   // 错误弹窗自动关闭（5秒后）
-  // Bug 91-92 修复：保存定时器引用以便清理
-  const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (error) {
-      if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-      errorTimerRef.current = setTimeout(() => {
+      const timer = setTimeout(() => {
         dismissError();
       }, 5000);
-      return () => {
-        if (errorTimerRef.current) {
-          clearTimeout(errorTimerRef.current);
-          errorTimerRef.current = null;
-        }
-      };
+      return () => clearTimeout(timer);
     }
   }, [error, dismissError]);
 
@@ -340,8 +364,8 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* 游戏中断连重连弹窗 — Bug 94 修复：断连时始终显示，isReconnecting 时显示重连中状态 */}
-      {currentView === 'game' && !isConnected && !isReconnecting && (
+      {/* 游戏中断连重连弹窗 */}
+      {currentView === 'game' && !isConnected && (
         <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/70 backdrop-blur-sm">
           <div className="card max-w-sm w-full mx-4 text-center space-y-4 animate-fade-in-up">
             <div className="text-4xl">🔌</div>

@@ -1,24 +1,17 @@
 /**
  * ============================================================================
- * 狼人杀联机游戏 — 全局共享类型定义
+ * 全局共享类型定义 — 狼人杀联机游戏类型基石
  * ============================================================================
  *
  * 架构说明：
  *   本文件是整个游戏系统的类型基石，被服务端和前端共同引用。
  *   所有枚举、接口、DTO 均在此定义，确保前后端类型契约严格一致。
  *
- * 核心设计原则：
- *   1. 零硬编码 — 所有配置均通过 RuleConfig 动态注入，类型系统强制约束
- *   2. 防作弊 DTO — PlayerDTO 仅暴露当前玩家可见信息，服务端脱敏层依赖此结构
- *   3. 动态夜间顺序 — nightActionOrder 为 string[] 数组，状态机按序遍历
- *   4. 白天中断协议 — KnightDuel / WhiteWolfExplode 可随时中断白天流程
- *
- * 类型安全说明（intentional design）：
- *   本文件中的枚举类型（GamePhase, RoleId, Faction, PlayerStatus 等）均使用
- *   TypeScript 字符串字面量联合类型（string literal union types）而非传统 enum。
- *   这是有意为之的设计选择：字符串字面量类型在序列化/反序列化时更安全，
- *   与 JSON 协议天然兼容，且不会产生运行时双重映射（enum 的反向映射）问题。
- *   如需运行时校验，应使用对应的常量数组或 Set 进行检查。
+ * 设计原则：
+ *   - 零硬编码 — 所有配置均通过 RuleConfig 动态注入，类型系统强制约束
+ *   - 防作弊 DTO — PlayerDTO 仅暴露当前玩家可见信息，服务端脱敏层依赖此结构
+ *   - 动态夜间顺序 — nightActionOrder 为 string[] 数组，状态机按序遍历
+ *   - 白天中断协议 — KnightDuel / WhiteWolfExplode 可随时中断白天流程
  * ============================================================================
  */
 
@@ -31,26 +24,19 @@
  * 命名规范：小写蛇形命名，与 RuleConfig.roleDistribution 的 key 对应
  */
 export type RoleId =
-  | 'villager'
-  | 'seer'
-  | 'witch'
-  | 'hunter'
-  | 'guard'
-  | 'idiot'
-  | 'knight'
-  | 'werewolf'
-  | 'white_wolf_king'
-  | 'wolf_king'
-  | 'nightmare_shadow'
-  | 'hidden_wolf'
-  | 'mechanical_wolf';
-
-export const ROLE_IDS = [
-  'villager', 'seer', 'witch', 'hunter', 'guard', 'idiot', 'knight',
-  'werewolf', 'white_wolf_king', 'wolf_king', 'nightmare_shadow', 'hidden_wolf', 'mechanical_wolf',
-] as const;
-
-export const VALID_ROLE_ID_SET = new Set<string>(ROLE_IDS);
+  | 'villager'          // 普通村民
+  | 'seer'              // 预言家
+  | 'witch'             // 女巫
+  | 'hunter'            // 猎人
+  | 'guard'             // 守卫
+  | 'idiot'             // 白痴
+  | 'knight'            // 骑士
+  | 'werewolf'          // 普通狼人
+  | 'white_wolf_king'   // 白狼王
+  | 'wolf_king'         // 狼王
+  | 'nightmare_shadow'  // 噩梦之影
+  | 'hidden_wolf'       // 隐狼
+  | 'mechanical_wolf';  // 机械狼
 
 /**
  * 阵营枚举
@@ -154,6 +140,8 @@ export const ROLE_META: Record<RoleId, RoleMeta> = {
 
 /**
  * 判断角色是否属于狼人阵营
+ * @param roleId - 角色唯一标识符
+ * @returns 是否为狼人阵营
  */
 export function isEvilRole(roleId: RoleId): boolean {
   return ROLE_META[roleId].faction === 'evil';
@@ -161,6 +149,8 @@ export function isEvilRole(roleId: RoleId): boolean {
 
 /**
  * 判断角色是否为隐狼（被查验时显示为好人）
+ * @param roleId - 角色唯一标识符
+ * @returns 是否为隐狼
  */
 export function isHiddenWolf(roleId: RoleId): boolean {
   return roleId === 'hidden_wolf';
@@ -168,19 +158,25 @@ export function isHiddenWolf(roleId: RoleId): boolean {
 
 /**
  * 判断角色是否属于"共同睁眼的狼人"（参与刀人投票）
- * 默认成员：普通狼人、狼王、白狼王、噩梦之影
+ * 默认成员：普通狼人、狼王、噩梦之影
  * 隐狼不属于共同睁眼的狼人
+ * @param roleId - 角色唯一标识符
+ * @param sharedWolfRoles - 自定义共同睁眼的狼人角色列表，为空时使用默认列表
+ * @returns 是否为共同睁眼的狼人
  */
 export function isSharedWolfRole(roleId: RoleId, sharedWolfRoles?: string[]): boolean {
   if (sharedWolfRoles && sharedWolfRoles.length > 0) {
     return sharedWolfRoles.includes(roleId);
   }
-  return roleId === 'werewolf' || roleId === 'wolf_king' || roleId === 'white_wolf_king' || roleId === 'nightmare_shadow';
+  // 默认：普通狼人、狼王、噩梦之影
+  return roleId === 'werewolf' || roleId === 'wolf_king' || roleId === 'nightmare_shadow';
 }
 
 /**
  * 判断角色是否拥有夜间行动能力（需要进入子阶段）
  * 普通村民和白痴没有夜间行动
+ * @param roleId - 角色唯一标识符
+ * @returns 是否拥有夜间行动能力
  */
 export function hasNightAction(roleId: RoleId): boolean {
   return roleId !== 'villager' && roleId !== 'idiot' && roleId !== 'hidden_wolf';
@@ -189,6 +185,8 @@ export function hasNightAction(roleId: RoleId): boolean {
 /**
  * 判断角色是否为模仿失败角色（平民/骑士/白痴）
  * 机械狼模仿这些角色时模仿失败
+ * @param roleId - 角色唯一标识符
+ * @returns 是否为模仿失败角色
  */
 export function isImitationFailRole(roleId: RoleId): boolean {
   return roleId === 'villager' || roleId === 'knight' || roleId === 'idiot';
@@ -197,15 +195,19 @@ export function isImitationFailRole(roleId: RoleId): boolean {
 /**
  * 判断角色是否为神职角色
  * 神职角色：预言家、女巫、猎人、守卫、白痴、骑士
+ * @param roleId - 角色唯一标识符
+ * @returns 是否为神职角色
  */
-const GOD_ROLES: RoleId[] = ['seer', 'witch', 'hunter', 'guard', 'idiot', 'knight'];
 export function isGodRole(roleId: RoleId): boolean {
-  return GOD_ROLES.includes(roleId);
+  const godRoles: RoleId[] = ['seer', 'witch', 'hunter', 'guard', 'idiot', 'knight'];
+  return godRoles.includes(roleId);
 }
 
 /**
  * 判断角色是否为平民角色
  * 平民角色：仅村民
+ * @param roleId - 角色唯一标识符
+ * @returns 是否为平民角色
  */
 export function isVillagerRole(roleId: RoleId): boolean {
   return roleId === 'villager';
@@ -342,7 +344,7 @@ export interface RuleConfig {
    */
   roleDistribution: Partial<Record<RoleId, number>>;
 
-  // ---- 夜间行动顺序 ----
+  // ============ 夜间行动顺序 ============
 
   /**
    * 夜间行动顺序数组
@@ -354,7 +356,7 @@ export interface RuleConfig {
   /** 当前使用的预置模板标识（chaos 表示手动排序） */
   nightActionOrderPreset: NightActionOrderPreset;
 
-  // ---- 村规配置 ----
+  // ============ 村规配置 ============
 
   /** 女巫能否自救 */
   witchSaveSelf: WitchSaveSelfRule;
@@ -398,7 +400,7 @@ export interface RuleConfig {
    */
   sharedWolfRoles: RoleId[];
 
-  // ---- 发言顺序 ----
+  // ============ 发言顺序 ============
 
   /** 发言顺序策略 */
   speechOrderStrategy: SpeechOrderStrategy;
@@ -448,6 +450,8 @@ export type SpeechOrderStrategy = 'DEATH_LEFT' | 'DEATH_RIGHT' | 'SHERIFF_LEFT' 
  * 创建默认 RuleConfig（所有字段均有合理默认值）
  * 注意：这不是硬编码游戏数据，而是创建房间的初始模板
  * 法官在 UI 上修改后覆盖这些默认值
+ * @param playerCount - 游戏总人数，默认 12
+ * @returns 包含所有默认值的规则配置对象
  */
 export function createDefaultRuleConfig(playerCount: number = 12): RuleConfig {
   return {
@@ -480,7 +484,7 @@ export function createDefaultRuleConfig(playerCount: number = 12): RuleConfig {
     winCondition: 'SLAUGHTER_SIDE',
     daytimeKillSequence: 'TRIGGER_ALL',
     werewolfSharedVision: 'ALL_SHARE',
-    sharedWolfRoles: ['werewolf', 'wolf_king', 'white_wolf_king', 'nightmare_shadow'],
+    sharedWolfRoles: ['werewolf', 'wolf_king', 'nightmare_shadow'],
     speechOrderStrategy: 'DEATH_LEFT',
     nightActionTimeout: 30,
     speechTimeout: 60,
@@ -516,7 +520,6 @@ export type GamePhase =
   | 'PRE_NIGHT'         // 入夜前等待
   | 'NIGHT'             // 夜间行动（含子阶段）
   | 'NIGHT_SETTLEMENT'  // 夜间结算
-  | 'NIGHT_SETTLEMENT_SKILL' // 夜间结算后等待死亡技能（猎人开枪/狼王开枪）
   | 'DAY_ANNOUNCE'      // 白天公布死讯
   | 'SHERIFF_ELECTION'   // 警长选举
   | 'SHERIFF_TRANSFER'   // 警徽移交（警长死亡时）
@@ -537,7 +540,6 @@ export const PHASE_NAMES: Record<GamePhase, string> = {
   PRE_NIGHT: '入夜等待',
   NIGHT: '天黑请闭眼',
   NIGHT_SETTLEMENT: '夜间结算中',
-  NIGHT_SETTLEMENT_SKILL: '死亡技能发动',
   DAY_ANNOUNCE: '天亮了',
   DAY_SPEECH: '发言阶段',
   PRE_VOTE_WAIT: '投票前等待',
@@ -572,19 +574,8 @@ export type GameMode = 'HUMAN' | 'SYSTEM';
 
 /**
  * 玩家存活状态
- *
- * 注意：'poisoned' 和 'voted_out' 目前未被服务端设置（服务端统一使用 'dead'），
- * 但客户端 SeatMap/JudgeConsole/PlayerList 等组件仍引用这些值判断死亡状态，因此保留。
  */
 export type PlayerStatus = 'alive' | 'dead' | 'poisoned' | 'voted_out';
-
-export const PLAYER_STATUSES = ['alive', 'dead', 'poisoned', 'voted_out'] as const;
-
-export const DEATH_CAUSES = [
-  'werewolf_kill', 'witch_poison', 'vote_out', 'hunter_gun',
-  'wolf_king_gun', 'white_wolf_explode', 'knight_duel',
-  'knight_suicide', 'guard_witch_conflict', 'judge_override',
-] as const;
 
 /**
  * 完整玩家数据（服务端内部使用，包含所有敏感信息）
@@ -628,8 +619,6 @@ export interface Player {
   hunterGunFired: boolean;
   /** 狼王是否已开枪 */
   wolfKingGunFired: boolean;
-  /** 骑士是否已发动过决斗（每局限一次） */
-  knightHasDueled: boolean;
   /** 隐狼是否已以狼人身份行动过（参与过狼人刀人投票） */
   hiddenWolfHasActed: boolean;
   /** 机械狼：模仿目标座位号 */
@@ -729,8 +718,6 @@ export interface RoomState {
   nightDeaths: NightDeathRecord[];
   /** 白天死亡列表 */
   dayDeaths: DayDeathRecord[];
-  /** 待处理的死亡技能（猎人开枪/狼王开枪） */
-  pendingDeathSkills: PendingDeathSkill[];
   /** 游戏是否暂停 */
   isPaused: boolean;
   /** 获胜阵营 */
@@ -743,6 +730,29 @@ export interface RoomState {
   endedAt: number | null;
   /** 配置版本号（规则21），用于追踪配置结构变更 */
   configVersion: number;
+  /** 待处理的亡语技能（猎人开枪/狼王开枪），流程暂停等待技能释放或超时 */
+  pendingDeathSkill: PendingDeathSkill | null;
+}
+
+/**
+ * 待处理的亡语技能
+ * 当猎人/狼王死亡且可开枪时，游戏流程暂停，等待玩家操作或超时
+ */
+export interface PendingDeathSkill {
+  /** 技能类型 */
+  type: 'hunter_gun' | 'wolf_king_gun';
+  /** 技能持有者座位号 */
+  seatNumber: number;
+  /** 技能持有者昵称 */
+  nickname: string;
+  /** 技能持有者玩家ID */
+  playerId: string;
+  /** 超时时间（秒） */
+  timeout: number;
+  /** 流程恢复回调标识（用于区分是从哪个阶段暂停的） */
+  resumePhase: 'PRE_NIGHT' | 'DAY_ANNOUNCE' | 'DAY_INTERRUPT';
+  /** 流程恢复时需要的额外数据 */
+  resumeData: Record<string, unknown>;
 }
 
 /**
@@ -813,19 +823,6 @@ export interface DayDeathRecord {
   /** 是否被法官改判 */
   overridden: boolean;
   overrideReason: string | null;
-}
-
-/**
- * 待处理的死亡技能
- * 当猎人或狼王死亡时，需要等待其使用死亡技能（开枪）或跳过
- */
-export interface PendingDeathSkill {
-  /** 座位号 */
-  seatNumber: number;
-  /** 角色：猎人或狼王 */
-  role: 'hunter' | 'wolf_king';
-  /** 是否已使用（开枪）或已跳过 */
-  used: boolean;
 }
 
 // ============================================================================
@@ -928,10 +925,8 @@ export interface PlayerRoomStateDTO {
   preNightHint: string | null;
   /** 自己当夜已提交的夜间行动（等待他人行动时可见） */
   myNightAction: NightActionData | null;
-  /** 待处理的死亡技能列表（客户端据此显示技能发动UI） */
-  pendingDeathSkills: PendingDeathSkill[];
-  /** 自己是否有待处理的死亡技能（可发动开枪技能） */
-  myPendingDeathSkill: PendingDeathSkill | null;
+  /** 待处理的亡语技能（猎人开枪/狼王开枪），仅技能持有者可见详情，其他人仅知有技能待处理 */
+  pendingDeathSkill: PendingDeathSkill | null;
 }
 
 /**
@@ -971,8 +966,8 @@ export interface JudgeRoomStateDTO {
   wolfChatMessages: WolfChatMessage[];
   /** 警长选举投票记录（法官可见全量） */
   sheriffElectionVotes: Record<number, number>;
-  /** 待处理的死亡技能（法官可见全量） */
-  pendingDeathSkills: PendingDeathSkill[];
+  /** 待处理的亡语技能（法官可见全量） */
+  pendingDeathSkill: PendingDeathSkill | null;
 }
 
 /**
@@ -1049,7 +1044,6 @@ export type ClientMessageType =
   | 'WHITE_WOLF_EXPLODE'
   | 'HUNTER_GUN'
   | 'WOLF_KING_GUN'
-  | 'SKIP_DEATH_SKILL'
   | 'SPEECH'
   | 'FINISH_SPEECH'
   | 'UPDATE_NIGHT_ORDER'
@@ -1072,6 +1066,7 @@ export type ClientMessageType =
   | 'ADMIN_CLEANUP_CONFIG'
   | 'SHERIFF_ELECTION_VOTE'
   | 'SHERIFF_TRANSFER'
+  | 'REPORT_ERROR'
   | 'PING';
 
 /**
@@ -1117,10 +1112,16 @@ export type ServerMessageType =
   | 'JUDGE_ACTION'
   | 'NIGHT_COUNTDOWN'
   | 'SPEECH_COUNTDOWN'
+  | 'HUNTER_CAN_SHOOT'
+  | 'WOLF_KING_CAN_SHOOT'
+  | 'PLAYER_KILLED_BY_GUN'
   | 'PONG';
 
-// ---- 客户端消息定义 ----
+// ============================================================================
+// 客户端消息定义
+// ============================================================================
 
+/** 创建房间消息 */
 export interface CreateRoomMessage {
   type: 'CREATE_ROOM';
   nickname: string;
@@ -1128,21 +1129,25 @@ export interface CreateRoomMessage {
   config: RuleConfig;
 }
 
+/** 加入房间消息 */
 export interface JoinRoomMessage {
   type: 'JOIN_ROOM';
   nickname: string;
   roomCode: string;
 }
 
+/** 离开房间消息 */
 export interface LeaveRoomMessage {
   type: 'LEAVE_ROOM';
 }
 
+/** 准备/取消准备消息 */
 export interface ReadyMessage {
   type: 'READY';
   ready: boolean;
 }
 
+/** 开始游戏消息 */
 export interface StartGameMessage {
   type: 'START_GAME';
 }
@@ -1226,13 +1231,6 @@ export interface HunterGunMessage {
 export interface WolfKingGunMessage {
   type: 'WOLF_KING_GUN';
   targetSeat: number;
-}
-
-/**
- * 跳过死亡技能 — 猎人/狼王主动放弃开枪
- */
-export interface SkipDeathSkillMessage {
-  type: 'SKIP_DEATH_SKILL';
 }
 
 /**
@@ -1435,6 +1433,17 @@ export interface ReconnectMessage {
 }
 
 /**
+ * 错误上报消息 — 客户端上报运行时错误/警告
+ */
+export interface ReportErrorMessage {
+  type: 'REPORT_ERROR';
+  level: 'error' | 'warn';
+  message: string;
+  stack: string | null;
+  context: Record<string, unknown>;
+}
+
+/**
  * 心跳消息 — 客户端定期发送 PING 以检测连接存活
  */
 export interface PingMessage {
@@ -1456,7 +1465,6 @@ export type ClientMessage =
   | WhiteWolfExplodeMessage
   | HunterGunMessage
   | WolfKingGunMessage
-  | SkipDeathSkillMessage
   | SpeechMessage
   | FinishSpeechMessage
   | UpdateNightOrderMessage
@@ -1478,11 +1486,15 @@ export type ClientMessage =
   | AdminCleanupConfigMessage
   | SheriffElectionVoteMessage
   | SheriffTransferClientMessage
+  | ReportErrorMessage
   | ReconnectMessage
   | PingMessage;
 
-// ---- 服务端消息定义 ----
+// ============================================================================
+// 服务端消息定义
+// ============================================================================
 
+/** 房间创建成功消息 */
 export interface RoomCreatedMessage {
   type: 'ROOM_CREATED';
   roomCode: string;
@@ -1499,6 +1511,7 @@ export interface RoomStateMessage {
   state: PlayerRoomStateDTO | JudgeRoomStateDTO;
 }
 
+/** 阶段变更消息 */
 export interface PhaseChangeMessage {
   type: 'PHASE_CHANGE';
   phase: GamePhase;
@@ -1506,11 +1519,13 @@ export interface PhaseChangeMessage {
   round: number;
 }
 
+/** 夜间行动请求消息 — 通知玩家进行夜间操作 */
 export interface NightActionRequestMessage {
   type: 'NIGHT_ACTION_REQUEST';
   request: NightActionRequestDTO;
 }
 
+/** 夜间行动结果消息 — 返回行动执行结果 */
 export interface NightActionResultMessage {
   type: 'NIGHT_ACTION_RESULT';
   roleId: RoleId;
@@ -1522,6 +1537,7 @@ export interface NightActionResultMessage {
   failReason: string | null;
 }
 
+/** 白天公布死讯消息 */
 export interface DayAnnounceMessage {
   type: 'DAY_ANNOUNCE';
   deaths: Array<{
@@ -1533,6 +1549,7 @@ export interface DayAnnounceMessage {
   mutedSeats: number[];
 }
 
+/** 投票结果消息 */
 export interface VoteResultMessage {
   type: 'VOTE_RESULT';
   votes: Record<number, number>;
@@ -1588,6 +1605,32 @@ export interface WolfKingGunResultMessage {
   targetNickname: string;
 }
 
+/** 猎人可开枪通知 */
+export interface HunterCanShootMessage {
+  type: 'HUNTER_CAN_SHOOT';
+  seatNumber: number;
+  nickname: string;
+  timeout: number;
+}
+
+/** 狼王可开枪通知 */
+export interface WolfKingCanShootMessage {
+  type: 'WOLF_KING_CAN_SHOOT';
+  seatNumber: number;
+  nickname: string;
+  timeout: number;
+}
+
+/** 开枪击杀通知（猎人/狼王开枪带走玩家） */
+export interface PlayerKilledByGunMessage {
+  type: 'PLAYER_KILLED_BY_GUN';
+  seatNumber: number;
+  nickname: string;
+  killedBy: number;
+  killedByNickname: string;
+  cause: string;
+}
+
 /** 白痴翻牌免死 */
 export interface IdiotRevealMessage {
   type: 'IDIOT_REVEAL';
@@ -1636,6 +1679,7 @@ export interface SheriffTransferResultMessage {
   isTimeout: boolean;
 }
 
+/** 游戏结束消息 */
 export interface GameOverMessage {
   type: 'GAME_OVER';
   winner: Faction;
@@ -1650,6 +1694,7 @@ export interface GameOverMessage {
   }>;
 }
 
+/** 错误消息 */
 export interface ErrorMessage {
   type: 'ERROR';
   code: string;
@@ -1668,6 +1713,7 @@ export interface JudgeWarningMessage {
   data: Record<string, unknown>;
 }
 
+/** 法官警告类型枚举 */
 export type JudgeWarningType =
   | 'NIGHTMARE_DEFERRED'           // 噩梦之影恐惧延期
   | 'NIGHTMARE_BLOCK_MODE_DOWNGRADE' // 恐惧封印模式自动降级
@@ -1675,6 +1721,7 @@ export type JudgeWarningType =
   | 'OVERRIDE_APPLIED'             // 法官改判已生效
   | 'NIGHT_ORDER_CHANGED';         // 夜间行动顺序已修改
 
+/** 发言顺序更新消息 */
 export interface SpeechOrderUpdateMessage {
   type: 'SPEECH_ORDER_UPDATE';
   order: number[];
@@ -1682,17 +1729,20 @@ export interface SpeechOrderUpdateMessage {
   mutedSeats: number[];
 }
 
+/** 玩家加入房间消息 */
 export interface PlayerJoinedMessage {
   type: 'PLAYER_JOINED';
   player: PlayerDTO;
 }
 
+/** 玩家离开房间消息 */
 export interface PlayerLeftMessage {
   type: 'PLAYER_LEFT';
   seatNumber: number;
   nickname: string;
 }
 
+/** 玩家准备状态变更消息 */
 export interface PlayerReadyMessage {
   type: 'PLAYER_READY';
   seatNumber: number;
@@ -1762,6 +1812,7 @@ export interface WolfChatHistoryMessage {
   isHistorical: boolean;
 }
 
+/** 管理员日志查询结果消息 */
 export interface AdminLogsResultMessage {
   type: 'ADMIN_LOGS_RESULT';
   logs: ActionLogDTO[];
@@ -1925,6 +1976,9 @@ export type ServerMessage =
   | SpeechCountdownMessage
   | ReconnectSuccessMessage
   | JudgeActionMessage
+  | HunterCanShootMessage
+  | WolfKingCanShootMessage
+  | PlayerKilledByGunMessage
   | PongMessage;
 
 // ============================================================================
@@ -1967,7 +2021,6 @@ export type ActionType =
   | 'HUNTER_GUN'
   | 'WOLF_KING_GUN'
   | 'IDIOT_REVEAL'
-  | 'DEATH_SKILL_SKIP'
   // 警长选举
   | 'SHERIFF_ELECTION_START'
   | 'SHERIFF_ELECTION_VOTE'

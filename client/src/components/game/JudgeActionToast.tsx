@@ -1,8 +1,16 @@
 /**
+ * ============================================================================
  * JudgeActionToast — 法官操作通知 Toast
+ * ============================================================================
  *
- * 在玩家视角实时展示法官介入操作（暂停、改判、跳过发言等），
- * 每条通知 5 秒后自动消失，也可手动关闭。
+ * 架构说明：
+ *   1. 在玩家视角实时展示法官介入操作（暂停、改判、跳过发言等）
+ *   2. 每条通知 5 秒后自动消失，也可手动关闭
+ *
+ * 设计原则：
+ *   - 法官自己不需要看到操作通知
+ *   - 不同操作类型使用不同的图标和颜色
+ * ============================================================================
  */
 
 import React from 'react';
@@ -35,6 +43,7 @@ const ACTION_COLORS: Record<JudgeActionType, string> = {
   TRIGGER_WHITE_WOLF: 'bg-orange-900/80 border-orange-700',
 };
 
+/** 法官操作通知 Toast 组件，实时展示法官介入操作 */
 function JudgeActionToast() {
   const judgeActions = useGameStore((s) => s.judgeActions);
   const dismissJudgeAction = useGameStore((s) => s.dismissJudgeAction);

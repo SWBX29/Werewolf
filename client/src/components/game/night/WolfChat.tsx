@@ -1,10 +1,23 @@
+/**
+ * ============================================================================
+ * WolfChat — 狼人专属聊天区域
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 仅狼人子阶段可见的私密聊天
+ *   2. 支持实时发送和接收消息
+ *
+ * 设计原则：
+ *   - 新消息自动滚动到底部
+ *   - 消息以座位号标识发送者
+ * ============================================================================
+ */
+
 import { useState, useRef, useEffect } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import type { WolfChatMessage } from '@langrensha/shared';
 
-/**
- * 狼人专属聊天区域 — 仅狼人子阶段可见
- */
+/** 狼人专属聊天区域，仅狼人子阶段可见 */
 export default function WolfChat() {
   const playerState = useGameStore((s) => s.playerState);
   const sendWolfChat = useGameStore((s) => s.sendWolfChat);
@@ -25,14 +38,6 @@ export default function WolfChat() {
     if (!content) return;
     sendWolfChat(content);
     setInput('');
-  };
-
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter') {
-      const content = input.trim();
-      if (!content) return;
-      handleSend();
-    }
   };
 
   return (
@@ -61,7 +66,9 @@ export default function WolfChat() {
           type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') handleSend();
+          }}
           placeholder="发送密语..."
           className="input-field flex-1 text-sm py-1"
           maxLength={200}

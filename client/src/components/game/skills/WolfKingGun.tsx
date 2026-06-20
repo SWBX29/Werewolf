@@ -1,3 +1,20 @@
+/**
+ * ============================================================================
+ * WolfKingGun — 狼王开枪技能组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 狼王死亡后触发的开枪技能面板，允许狼王选择带走一名玩家或放弃开枪
+ *   2. 根据村规配置判断狼王是否可在被毒死或被骑士决斗时开枪
+ *   3. 提供目标选择、确认弹窗和倒计时功能
+ *
+ * 设计原则：
+ *   - 被毒死封枪：通过 ruleConfig.poisonBlockGun 控制是否封印
+ *   - 骑士决斗规则：通过 ruleConfig.knightDuelWolfKing 控制决斗出局后是否可开枪
+ *   - 一次性操作：开枪后设置 gunFired 标记，防止重复操作
+ * ============================================================================
+ */
+
 import React, { useState } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import type { KnightDuelWolfKingRule } from '@langrensha/shared';
@@ -5,6 +22,7 @@ import TargetSelector from '../TargetSelector';
 import CountdownTimer from '../CountdownTimer';
 import ConfirmDialog from '../ConfirmDialog';
 
+/** 狼王开枪技能组件 */
 const WolfKingGun: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
   const ruleConfig = useGameStore((s) => s.ruleConfig);
@@ -26,12 +44,10 @@ const WolfKingGun: React.FC = () => {
   // 已开枪则不再显示
   if (gunFired) return null;
 
-  // Bug 8 修复：使用 deathCause 判断是否被毒死，而非 status
-  // 服务端可能将所有死亡玩家状态设为 'dead'，需要通过 deathCause 区分死因
+  // 被毒死且规则封印枪 → 显示无法开枪提示
   const isPoisoned = myPlayer.deathCause === 'witch_poison';
   const poisonBlockGun = ruleConfig.poisonBlockGun;
 
-  // 被毒死且规则封印枪 → 显示无法开枪提示
   if (isPoisoned && poisonBlockGun) {
     return (
       <div className="wolf-panel p-4 space-y-3">
@@ -44,40 +60,16 @@ const WolfKingGun: React.FC = () => {
     );
   }
 
-  // 骑士决斗出狼王时，根据 knightDuelWolfKing 配置决定能否开枪
-  const knightDuelWolfKing: KnightDuelWolfKingRule = ruleConfig.knightDuelWolfKing;
-
-  // 判断是否因骑士决斗出局（通过死亡原因判断）
-  // 如果是被骑士决斗出局且规则为 SILENCED，则无法开枪
-  // 注意：PlayerDTO 中没有 deathCause 字段，所以这里通过 nightActionRequest 或其他方式判断
-  // 实际上，服务端会在 nightActionRequest 中处理此逻辑
-  // 如果服务端没有发送 nightActionRequest 给狼王，说明被决斗封印了
-
-  const nightActionRequest = playerState.nightActionRequest;
-
-  // 如果因骑士决斗被 SILENCED，服务端不会发送 nightActionRequest
-  // 这里我们通过 knightDuelWolfKing 规则和当前状态来推断
-  // 但更可靠的方式是：如果服务端认为狼王可以开枪，会发送相应的行动请求
-  // 如果没有行动请求且狼王已死亡，可能是被决斗封印或其他原因
+  // 从 pendingDeathSkill 获取超时时间
+  const pendingSkill = playerState.pendingDeathSkill;
+  const skillTimeout = pendingSkill?.type === 'wolf_king_gun' ? pendingSkill.timeout : 0;
 
   const { players } = playerState;
 
   // 可开枪目标：所有存活玩家（排除自己）
-  // 如果有 nightActionRequest 则使用其可用目标列表
-  const gunTargets = nightActionRequest?.roleId === 'wolf_king'
-    ? nightActionRequest.availableTargets
-    : players
-        .filter((p) => !p.isJudge && p.status === 'alive' && p.seatNumber !== myPlayer.seatNumber)
-        .map((p) => p.seatNumber);
-
-  // 被禁用的目标
-  const disabledTargets = nightActionRequest?.roleId === 'wolf_king'
-    ? nightActionRequest.disabledTargets
-    : [];
-
-  const disabledReasons = nightActionRequest?.roleId === 'wolf_king'
-    ? nightActionRequest.disabledReasons
-    : {};
+  const gunTargets = players
+    .filter((p) => !p.isJudge && p.status === 'alive' && p.seatNumber !== myPlayer.seatNumber)
+    .map((p) => p.seatNumber);
 
   const getPlayerName = (seat: number) => {
     const p = players.find((pl) => pl.seatNumber === seat);
@@ -97,6 +89,7 @@ const WolfKingGun: React.FC = () => {
   };
 
   // 规则说明
+  const knightDuelWolfKing: KnightDuelWolfKingRule = ruleConfig.knightDuelWolfKing;
   const getRuleHint = () => {
     if (knightDuelWolfKing === 'SILENCED') {
       return '当前村规：被骑士决斗出局时不可开枪';
@@ -110,9 +103,9 @@ const WolfKingGun: React.FC = () => {
       <p className="text-sm text-gray-400">你已出局，可以选择开枪带走一名玩家</p>
       <p className="text-xs text-gray-500">{getRuleHint()}</p>
 
-      {/* 倒计时（仅在有 nightActionRequest 时显示） */}
-      {nightActionRequest?.roleId === 'wolf_king' && nightActionRequest.timeout > 0 && (
-        <CountdownTimer seconds={nightActionRequest.timeout} />
+      {/* 倒计时 */}
+      {skillTimeout > 0 && (
+        <CountdownTimer seconds={skillTimeout} />
       )}
 
       <TargetSelector
@@ -121,8 +114,8 @@ const WolfKingGun: React.FC = () => {
         mySeat={myPlayer.seatNumber}
         selected={selectedSeat}
         onSelect={setSelectedSeat}
-        disabledTargets={disabledTargets}
-        disabledReasons={disabledReasons}
+        disabledTargets={[]}
+        disabledReasons={{}}
       />
 
       <div className="flex gap-2">

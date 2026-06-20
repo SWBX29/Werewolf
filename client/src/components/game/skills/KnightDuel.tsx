@@ -1,3 +1,20 @@
+/**
+ * ============================================================================
+ * KnightDuel — 骑士决斗技能组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 骑士在白天发言或投票前等待阶段发动的决斗技能，选择一名玩家进行决斗
+ *   2. 根据村规配置判断决斗失败时骑士是否自尽
+ *   3. 提供目标选择、确认弹窗和决斗结果展示
+ *
+ * 设计原则：
+ *   - 决斗时机：发言阶段仅当前发言者可发动，投票前等待阶段任何存活骑士可发动
+ *   - 操作锁定：确认决斗时先锁定状态再提交，防止重复操作
+ *   - 决斗结果由服务端判定，包含目标是否为狼人、骑士是否死亡等信息
+ * ============================================================================
+ */
+
 import React, { useState } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import { ROLE_META } from '@langrensha/shared';
@@ -5,13 +22,14 @@ import type { KnightDuelSuicideRule } from '@langrensha/shared';
 import TargetSelector from '../TargetSelector';
 import ConfirmDialog from '../ConfirmDialog';
 
+/** 骑士决斗技能组件 */
 const KnightDuel: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
   const ruleConfig = useGameStore((s) => s.ruleConfig);
   const knightDuelResult = useGameStore((s) => s.knightDuelResult);
   const knightDuel = useGameStore((s) => s.knightDuel);
   const dismissKnightDuelResult = useGameStore((s) => s.dismissKnightDuelResult);
-  // Bug 63 修复：添加 isActionLocked 检查，防止重复决斗
+  // 检查是否已锁定操作，防止重复决斗
   const isActionLocked = useGameStore((s) => s.isActionLocked);
   const setActionLocked = useGameStore((s) => s.setActionLocked);
 
@@ -24,7 +42,7 @@ const KnightDuel: React.FC = () => {
   const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
   if (!myPlayer || myPlayer.role !== 'knight') return null;
 
-  // Bug 6 修复：在白天发言阶段（DAY_SPEECH）或投票前等待阶段（PRE_VOTE_WAIT）都可以发动决斗
+  // 在白天发言阶段（DAY_SPEECH）或投票前等待阶段（PRE_VOTE_WAIT）都可以发动决斗
   if (playerState.phase !== 'DAY_SPEECH' && playerState.phase !== 'PRE_VOTE_WAIT') return null;
 
   const { speechOrder, currentSpeakerIndex, players } = playerState;
@@ -50,19 +68,19 @@ const KnightDuel: React.FC = () => {
   };
 
   const handleStartDuel = () => {
-    // Bug 63 修复：检查是否已锁定
+    // 检查是否已锁定操作
     if (isActionLocked) return;
     setShowTargetSelect(true);
   };
 
   const handleTargetConfirm = () => {
-    // Bug 63 修复：检查是否已锁定和目标有效性
+    // 检查是否已锁定和目标有效性
     if (selectedSeat === null || isActionLocked) return;
     setShowConfirm(true);
   };
 
   const handleConfirmDuel = () => {
-    // Bug 63 修复：检查目标有效性并先锁定状态
+    // 检查目标有效性并先锁定状态
     if (selectedSeat === null || isActionLocked) return;
     setActionLocked(true);
     knightDuel(selectedSeat);

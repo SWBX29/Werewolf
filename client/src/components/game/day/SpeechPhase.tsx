@@ -1,3 +1,20 @@
+/**
+ * ============================================================================
+ * SpeechPhase — 白天发言阶段组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 管理白天发言阶段的完整交互，包括发言顺序、消息列表、语音控制
+ *   2. 集成天亮公告覆盖层、遗言输入、白狼王自爆、骑士决斗等子功能
+ *   3. 通过全局状态同步发言进度和倒计时
+ *
+ * 设计原则：
+ *   - 语音控制根据当前发言者自动切换麦克风开关
+ *   - 倒计时使用服务端同步数据，避免客户端计时偏差
+ *   - 白狼王自爆和骑士决斗作为发言阶段的嵌入子功能
+ * ============================================================================
+ */
+
 import React, { useEffect, useRef, useState } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import { useVoiceStore } from '../../../store/useVoiceStore';
@@ -6,6 +23,7 @@ import CountdownTimer from '../CountdownTimer';
 import TargetSelector from '../TargetSelector';
 import KnightDuel from '../skills/KnightDuel';
 
+/** 白天发言阶段组件 */
 const SpeechPhase: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
   const speechMessages = useGameStore((s) => s.speechMessages);
@@ -34,7 +52,7 @@ const SpeechPhase: React.FC = () => {
   const [lastWordsInput, setLastWordsInput] = useState('');
   const [lastWordsSubmitted, setLastWordsSubmitted] = useState(false);
 
-  // Bug 10 修复：白天发言阶段语音控制，添加 players 到依赖数组
+  // 白天发言阶段语音控制，需要 players 作为依赖
   useEffect(() => {
     if (!enableVoice || !playerState || connectionState !== 'CONNECTED') return;
 
@@ -52,12 +70,10 @@ const SpeechPhase: React.FC = () => {
     }
 
     return () => {
-      if (useVoiceStore.getState().connectionState === 'CONNECTED') {
-        setCanSpeak(true);
-        getZegoVoiceService().muteMicrophone(false);
-      }
+      setCanSpeak(true);
+      getZegoVoiceService().muteMicrophone(false);
     };
-  }, [playerState?.speechOrder, playerState?.currentSpeakerIndex, playerState?.myPlayerId, connectionState, playerState?.players, enableVoice, setCanSpeak]);
+  }, [playerState?.speechOrder, playerState?.currentSpeakerIndex, playerState?.myPlayerId, connectionState, playerState?.players, enableVoice]);
 
   // 天亮公告：5秒倒计时全屏覆盖 → 倒计时结束后显示内联摘要
   const [showDawnOverlay, setShowDawnOverlay] = useState(false);
@@ -95,14 +111,14 @@ const SpeechPhase: React.FC = () => {
   const currentSpeakerSeat = speechOrder[currentSpeakerIndex] ?? null;
   const isMyTurn = currentSpeakerSeat === mySeat;
 
-  // Bug 2 修复：使用服务端同步的倒计时，仅在 speechTimeRemaining > 0 时显示
+  // 使用服务端同步的倒计时，仅在 speechTimeRemaining > 0 时显示
   // 当 speechTimeRemaining === 0 时，表示正在等待服务端同步，显示"等待中"而非回退到完整超时
   const speechCountdownSeconds = speechTimeRemaining > 0 ? speechTimeRemaining : null;
 
   const isKnight = myPlayer?.role === 'knight';
   const isWhiteWolfKing = myPlayer?.role === 'white_wolf_king';
 
-  // Bug 7 修复：判断是否需要发表遗言（被投票出局等场景，自己已死亡且处于发言阶段）
+  // 判断是否需要发表遗言（被投票出局等场景，自己已死亡且处于发言阶段）
   // 需要检查所有死亡状态：dead, poisoned, voted_out
   const needLastWords = !isAlive && myPlayer?.status !== 'alive';
 
@@ -114,7 +130,7 @@ const SpeechPhase: React.FC = () => {
   // 自动滚动到底部
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [speechMessages.length]);
+  }, [speechMessages]);
 
   const handleSend = () => {
     const trimmed = inputValue.trim();
@@ -126,7 +142,6 @@ const SpeechPhase: React.FC = () => {
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      if (!inputValue.trim()) return;
       handleSend();
     }
   };
@@ -134,7 +149,6 @@ const SpeechPhase: React.FC = () => {
   const handleLastWordsKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      if (!lastWordsInput.trim()) return;
       handleLastWordsSend();
     }
   };

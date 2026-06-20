@@ -1,16 +1,30 @@
+/**
+ * ============================================================================
+ * PlayerList — 玩家/座位列表组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 显示所有玩家的座位号、昵称、存活状态、发言顺序
+ *
+ * 设计原则：
+ *   - 兼顾法官与玩家两种视角，自动切换数据源
+ *   - 支持紧凑模式（底部栏）和完整模式
+ *   - 点击自己的座位可查看角色信息
+ * ============================================================================
+ */
+
 import React, { useState } from 'react';
 import { useGameStore } from '../../useGameStore';
 import type { PlayerDTO } from '@langrensha/shared';
 import { ROLE_META } from '@langrensha/shared';
 
-/**
- * 玩家/座位列表组件
- * 显示所有玩家的座位号、昵称、存活状态、发言顺序
- */
+/** 玩家列表属性接口 */
 interface PlayerListProps {
+  /** 是否紧凑模式（底部栏使用） */
   compact?: boolean;
 }
 
+/** 玩家/座位列表组件，显示座位号、昵称、存活状态、发言顺序 */
 function PlayerList({ compact = false }: PlayerListProps) {
   const playerState = useGameStore((s) => s.playerState);
   const judgeState = useGameStore((s) => s.judgeState);

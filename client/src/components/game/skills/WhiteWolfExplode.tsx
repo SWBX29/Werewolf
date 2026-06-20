@@ -1,8 +1,26 @@
+/**
+ * ============================================================================
+ * WhiteWolfExplode — 白狼王自爆技能组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 白狼王在白天发言或投票阶段触发的自爆技能，选择带走一名玩家并强制入夜
+ *   2. 通过服务端确认状态跟踪，确保自爆操作在服务端确认后才更新本地状态
+ *   3. 提供目标选择、确认弹窗和等待服务端确认的交互流程
+ *
+ * 设计原则：
+ *   - 服务端确认状态跟踪：先设置 pending 状态，等服务端确认后再设置 exploded
+ *   - 仅在白天发言/投票阶段可自爆
+ *   - 自爆操作不可撤回，需二次确认
+ * ============================================================================
+ */
+
 import React, { useState, useEffect } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import TargetSelector from '../TargetSelector';
 import ConfirmDialog from '../ConfirmDialog';
 
+/** 白狼王自爆技能组件 */
 const WhiteWolfExplode: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
   const whiteWolfExplode = useGameStore((s) => s.whiteWolfExplode);
@@ -12,10 +30,10 @@ const WhiteWolfExplode: React.FC = () => {
   const [selectedSeat, setSelectedSeat] = useState<number | null>(null);
   const [showConfirm, setShowConfirm] = useState(false);
   const [exploded, setExploded] = useState(false);
-  // Bug 11 修复：添加服务端确认状态跟踪
+  // 服务端确认状态跟踪
   const [pendingExplode, setPendingExplode] = useState(false);
 
-  // Bug 11 修复：当服务端确认后（玩家状态变为非存活），才设置 exploded
+  // 当服务端确认后（玩家状态变为非存活），才设置 exploded
   useEffect(() => {
     if (!playerState) return;
     const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
@@ -78,7 +96,7 @@ const WhiteWolfExplode: React.FC = () => {
 
   const handleConfirmExplode = () => {
     if (selectedSeat === null) return;
-    // Bug 11 修复：先设置 pending 状态，等服务端确认后再设置 exploded
+    // 先设置 pending 状态，等服务端确认后再设置 exploded
     setPendingExplode(true);
     whiteWolfExplode(selectedSeat);
     setShowConfirm(false);

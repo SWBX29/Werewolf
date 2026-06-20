@@ -119,6 +119,7 @@ function getErrorSolution(error: string): { solution: string; action?: string } 
 // 组件实现
 // ============================================================================
 
+/** 语音控制栏组件，提供麦克风/扬声器切换、连接状态显示、错误提示等功能 */
 export default function VoiceControlBar({ compact = false }: VoiceControlBarProps) {
   const {
     connectionState,
@@ -170,7 +171,7 @@ export default function VoiceControlBar({ compact = false }: VoiceControlBarProp
           ? '语音重连中...'
           : '语音未连接';
 
-  // Bug 18 修复：将 userID 映射为昵称
+  // 将正在说话的 userID 映射为玩家昵称
   const speakingUserIds = Object.keys(speakingUsers);
   const speakingNames = speakingUserIds.map((uid) => {
     // 尝试从玩家列表中找到对应的玩家

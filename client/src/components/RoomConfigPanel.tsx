@@ -3,19 +3,16 @@
  * RoomConfigPanel — 房间配置面板（可复用组件）
  * ============================================================================
  *
- * 提供完整的房间创建配置 UI：
+ * 架构说明：
  *   1. 角色池配置（数量调整）
  *   2. 夜间行动顺序配置
  *   3. 村规配置（所有选项）
  *   4. 超时配置
  *
- * 使用场景：
- *   - HomeView：创建房间时使用
- *   - 模拟器 RoomSetupPanel：复用此组件
- *
  * 设计原则：
  *   - 纯 UI 组件，状态由父组件管理
  *   - 通过 props 接收 ruleConfig 和回调函数
+ *   - HomeView 和模拟器 RoomSetupPanel 复用此组件
  * ============================================================================
  */
 
@@ -91,9 +88,7 @@ export interface RoomConfigPanelProps {
   error?: string | null;
 }
 
-// ============================================================================
-// RoomConfigPanel 组件
-// ============================================================================
+/** 房间配置面板，提供角色池、夜间顺序、村规和超时配置 */
 
 const RoomConfigPanel: React.FC<RoomConfigPanelProps> = ({
   ruleConfig,
@@ -307,7 +302,7 @@ const RoomConfigPanel: React.FC<RoomConfigPanelProps> = ({
         <div className="space-y-2">
           <span className="text-sm">猎人死亡可带人（多选）</span>
           <div className="flex flex-wrap gap-2">
-            {(['witch_poison', 'werewolf_kill', 'vote_out'] as HunterDeathShootCause[]).map(
+            {(['witch_poison', 'werewolf_kill', 'vote_out', 'guard_witch_conflict'] as HunterDeathShootCause[]).map(
               (cause) => {
                 const isSelected = ruleConfig.hunterDeathShootCauses.includes(cause);
                 return (
@@ -524,18 +519,22 @@ const RoomConfigPanel: React.FC<RoomConfigPanelProps> = ({
             {ROLE_ITEMS.filter((r) => r.faction === 'evil' && r.id !== 'hidden_wolf').map(
               (role) => {
                 const isSelected = ruleConfig.sharedWolfRoles.includes(role.id);
+                const hasCount = (ruleConfig.roleDistribution[role.id] ?? 0) > 0;
                 return (
                   <label
                     key={role.id}
                     className={`flex items-center gap-1 px-3 py-1.5 rounded-lg border cursor-pointer text-sm transition-colors ${
-                      isSelected
-                        ? 'bg-red-900/40 border-red-700 text-red-200'
-                        : 'bg-night-800 border-night-600 text-gray-400 hover:border-night-500'
+                      !hasCount
+                        ? 'bg-night-800/50 border-night-700 text-gray-600 cursor-not-allowed'
+                        : isSelected
+                          ? 'bg-red-900/40 border-red-700 text-red-200'
+                          : 'bg-night-800 border-night-600 text-gray-400 hover:border-night-500'
                     }`}
                   >
                     <input
                       type="checkbox"
                       checked={isSelected}
+                      disabled={!hasCount}
                       onChange={(e) => {
                         const newList = e.target.checked
                           ? [...ruleConfig.sharedWolfRoles, role.id]

@@ -3,7 +3,7 @@
  * HomeView — 纯净版开始界面
  * ============================================================================
  *
- * 功能：
+ * 架构说明：
  *   1. 「加入房间」入口：输入昵称 + 6位房间码
  *   2. 「创建房间」入口：唤起动态村规配置面板
  *   3. 创建成功后显示房间码和邀请链接/二维码
@@ -20,9 +20,7 @@ import RoomConfigPanel, { ROLE_ITEMS } from './RoomConfigPanel';
 import type { RoleId, RuleConfig, GameMode, NightActionOrderPreset } from '@langrensha/shared';
 import { NIGHT_ACTION_ORDER_PRESETS } from '@langrensha/shared';
 
-// ============================================================================
-// HomeView 组件
-// ============================================================================
+/** 纯净版开始界面，提供加入/创建房间入口 */
 
 const HomeView: React.FC = () => {
   const [showCreatePanel, setShowCreatePanel] = useState(false);
@@ -35,10 +33,10 @@ const HomeView: React.FC = () => {
   const [createNickname, setCreateNickname] = useState('');
   const [createGameMode, setCreateGameMode] = useState<GameMode>('HUMAN');
 
-  // Bug 4 修复：使用 ref 防止重复点击和追踪连接等待状态
+  // 使用 ref 防止重复点击和追踪连接等待状态
   const isConnectingRef = useRef(false);
 
-  // Zustand store
+  // Zustand 状态仓库
   const {
     createRoom,
     joinRoom,
@@ -52,7 +50,7 @@ const HomeView: React.FC = () => {
     connect,
   } = useGameStore();
 
-  // Bug 4 修复：等待 WebSocket 连接建立的辅助函数
+  // 等待 WebSocket 连接建立的辅助函数
   const waitForConnection = (): Promise<void> => {
     return new Promise((resolve) => {
       if (useGameStore.getState().isConnected) {
@@ -90,7 +88,7 @@ const HomeView: React.FC = () => {
     if (!joinNickname.trim()) return;
     if (!joinRoomCode.trim()) return;
 
-    // Bug 4 修复：等待连接建立后再发送消息
+    // 等待连接建立后再发送消息
     await waitForConnection();
     if (useGameStore.getState().isConnected) {
       joinRoom(joinNickname.trim(), joinRoomCode.trim().toUpperCase());
@@ -101,7 +99,7 @@ const HomeView: React.FC = () => {
   const handleCreate = async () => {
     if (!createNickname.trim()) return;
 
-    // Bug 4 修复：等待连接建立后再发送消息
+    // 等待连接建立后再发送消息
     await waitForConnection();
     if (useGameStore.getState().isConnected) {
       createRoom(createNickname.trim(), createGameMode, ruleConfig);
@@ -143,7 +141,18 @@ const HomeView: React.FC = () => {
       if (evilCount < 1 || goodCount < 3) return;
     }
 
-    updateRuleConfig({ roleDistribution: newDistribution, playerCount: total });
+    // 自动同步 sharedWolfRoles
+    const wolfRoles = ['werewolf', 'wolf_king', 'white_wolf_king', 'nightmare_shadow', 'mechanical_wolf'] as const;
+    const newCount = newDistribution[roleId] ?? 0;
+    const wasInShared = (ruleConfig.sharedWolfRoles || []).includes(roleId);
+    let sharedWolfRoles = ruleConfig.sharedWolfRoles;
+    if (newCount > 0 && !wasInShared && wolfRoles.includes(roleId as any)) {
+      sharedWolfRoles = [...(ruleConfig.sharedWolfRoles || []), roleId];
+    } else if (newCount === 0 && wasInShared) {
+      sharedWolfRoles = (ruleConfig.sharedWolfRoles || []).filter(r => r !== roleId);
+    }
+
+    updateRuleConfig({ roleDistribution: newDistribution, playerCount: total, sharedWolfRoles });
   };
 
   // ---- 夜间行动顺序拖拽排序 ----

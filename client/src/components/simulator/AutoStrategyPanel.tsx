@@ -1,11 +1,29 @@
+/**
+ * ============================================================================
+ * AutoStrategyPanel — 自动策略配置面板
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 提供模拟器中各角色的自动行动策略配置界面
+ *   2. 支持三种自动模式：关闭、仅建议、自动执行
+ *   3. 每个角色可独立配置策略类型与自定义目标
+ *
+ * 设计原则：
+ *   - 按角色分块折叠展示，避免界面过长
+ *   - 自定义目标输入采用受控 + onBlur 同步模式，减少频繁更新
+ *   - 复用小型表单组件（SmallSelect / SmallToggle / SmallInput）保持风格统一
+ * ============================================================================
+ */
+
 import { useState, useCallback } from 'react';
 import { useSimulatorStore } from './useSimulatorStore';
 import type { AutoStrategies } from './types';
 
 // ============================================================================
-// 角色策略配置标签映射
+// 角色策略配置标签与图标映射
 // ============================================================================
 
+/** 角色中文名称映射 */
 const ROLE_LABELS: Record<string, string> = {
   seer: '预言家',
   witch: '女巫',
@@ -20,6 +38,7 @@ const ROLE_LABELS: Record<string, string> = {
   knightDuel: '骑士决斗',
 };
 
+/** 角色图标映射 */
 const ROLE_ICONS: Record<string, string> = {
   seer: '🔮',
   witch: '🧪',
@@ -34,18 +53,21 @@ const ROLE_ICONS: Record<string, string> = {
   knightDuel: '⚔️',
 };
 
+/** 自动模式选项 */
 const AUTO_MODE_OPTIONS = [
   { value: 'off', label: '关闭' },
   { value: 'suggest', label: '仅建议' },
   { value: 'auto', label: '自动执行' },
 ] as const;
 
+/** 预言家策略选项 */
 const SEER_STRATEGY_OPTIONS = [
   { value: 'random', label: '随机' },
   { value: 'suspicious_first', label: '可疑优先' },
   { value: 'custom_list', label: '自定义列表' },
 ] as const;
 
+/** 女巫毒药优先级选项 */
 const WITCH_POISON_PRIORITY_OPTIONS = [
   { value: 'random', label: '随机' },
   { value: 'evil_first', label: '邪恶优先' },
@@ -180,9 +202,7 @@ function SmallInput({
 function parseNumbers(text: string): number[] {
   return text
     .split(/[,，\s]+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0)
-    .map((s) => parseInt(s, 10))
+    .map((s) => parseInt(s.trim(), 10))
     .filter((n) => !isNaN(n) && n > 0);
 }
 
@@ -226,9 +246,7 @@ function CollapsibleSection({
   );
 }
 
-// ============================================================================
-// 主组件
-// ============================================================================
+/** 自动策略配置面板，提供各角色的自动行动策略配置界面 */
 
 export default function AutoStrategyPanel() {
   const autoMode = useSimulatorStore((s) => s.autoMode);
@@ -267,12 +285,7 @@ export default function AutoStrategyPanel() {
   const handleCustomBlur = useCallback(
     (key: string, roleId: string, field: string, text: string) => {
       const nums = parseNumbers(text);
-      // Bug 117 修复：输入为空或无效时删除 customInputs 中的 key
-      if (nums.length > 0) {
-        updateStrategy(roleId, { [field]: nums });
-      } else {
-        updateStrategy(roleId, { [field]: undefined });
-      }
+      updateStrategy(roleId, { [field]: nums.length > 0 ? nums : undefined });
       setCustomInputs((prev) => {
         const next = { ...prev };
         delete next[key];
@@ -470,7 +483,7 @@ export default function AutoStrategyPanel() {
                     const nums = parseNumbers(
                       getCustomInput('werewolf_custom', autoStrategies.werewolf.customTarget ? [autoStrategies.werewolf.customTarget] : undefined),
                     );
-                    updateStrategy('werewolf', { customTarget: nums.length > 0 ? nums[0] : undefined });
+                    updateStrategy('werewolf', { customTarget: nums[0] });
                     setCustomInputs((prev) => {
                       const next = { ...prev };
                       delete next['werewolf_custom'];
@@ -539,7 +552,7 @@ export default function AutoStrategyPanel() {
                     const nums = parseNumbers(
                       getCustomInput('mewolf_custom', autoStrategies.mechanicalWolf.customTarget ? [autoStrategies.mechanicalWolf.customTarget] : undefined),
                     );
-                    updateStrategy('mechanicalWolf', { customTarget: nums.length > 0 ? nums[0] : undefined });
+                    updateStrategy('mechanicalWolf', { customTarget: nums[0] });
                     setCustomInputs((prev) => {
                       const next = { ...prev };
                       delete next['mewolf_custom'];
@@ -575,7 +588,7 @@ export default function AutoStrategyPanel() {
                     const nums = parseNumbers(
                       getCustomInput('vote_custom', autoStrategies.vote.customTarget ? [autoStrategies.vote.customTarget] : undefined),
                     );
-                    updateStrategy('vote', { customTarget: nums.length > 0 ? nums[0] : undefined });
+                    updateStrategy('vote', { customTarget: nums[0] });
                     setCustomInputs((prev) => {
                       const next = { ...prev };
                       delete next['vote_custom'];
@@ -611,7 +624,7 @@ export default function AutoStrategyPanel() {
                     const nums = parseNumbers(
                       getCustomInput('hunter_custom', autoStrategies.hunterGun.customTarget ? [autoStrategies.hunterGun.customTarget] : undefined),
                     );
-                    updateStrategy('hunterGun', { customTarget: nums.length > 0 ? nums[0] : undefined });
+                    updateStrategy('hunterGun', { customTarget: nums[0] });
                     setCustomInputs((prev) => {
                       const next = { ...prev };
                       delete next['hunter_custom'];
@@ -647,7 +660,7 @@ export default function AutoStrategyPanel() {
                     const nums = parseNumbers(
                       getCustomInput('wkgun_custom', autoStrategies.wolfKingGun.customTarget ? [autoStrategies.wolfKingGun.customTarget] : undefined),
                     );
-                    updateStrategy('wolfKingGun', { customTarget: nums.length > 0 ? nums[0] : undefined });
+                    updateStrategy('wolfKingGun', { customTarget: nums[0] });
                     setCustomInputs((prev) => {
                       const next = { ...prev };
                       delete next['wkgun_custom'];
@@ -690,7 +703,7 @@ export default function AutoStrategyPanel() {
                         const nums = parseNumbers(
                           getCustomInput('wwexp_custom', autoStrategies.whiteWolfExplode.customTarget ? [autoStrategies.whiteWolfExplode.customTarget] : undefined),
                         );
-                        updateStrategy('whiteWolfExplode', { customTarget: nums.length > 0 ? nums[0] : undefined });
+                        updateStrategy('whiteWolfExplode', { customTarget: nums[0] });
                         setCustomInputs((prev) => {
                           const next = { ...prev };
                           delete next['wwexp_custom'];
@@ -735,7 +748,7 @@ export default function AutoStrategyPanel() {
                         const nums = parseNumbers(
                           getCustomInput('knight_custom', autoStrategies.knightDuel.customTarget ? [autoStrategies.knightDuel.customTarget] : undefined),
                         );
-                        updateStrategy('knightDuel', { customTarget: nums.length > 0 ? nums[0] : undefined });
+                        updateStrategy('knightDuel', { customTarget: nums[0] });
                         setCustomInputs((prev) => {
                           const next = { ...prev };
                           delete next['knight_custom'];

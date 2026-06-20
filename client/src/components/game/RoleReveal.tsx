@@ -1,12 +1,25 @@
+/**
+ * ============================================================================
+ * RoleReveal — 角色揭示组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 游戏开始时显示玩家分配的角色信息
+ *   2. ROLE_REVEAL 阶段由服务端倒计时驱动，其他阶段由客户端确认按钮驱动
+ *
+ * 设计原则：
+ *   - 展示角色名称、阵营、技能描述和风味文本
+ *   - 确认后不再出现
+ * ============================================================================
+ */
+
 import { useState, useEffect } from 'react';
 import { useGameStore } from '../../useGameStore';
 import type { RoleId } from '@langrensha/shared';
 import { ROLE_META } from '@langrensha/shared';
 import CountdownTimer from './CountdownTimer';
 
-/**
- * 角色 emoji 映射
- */
+/** 角色 emoji 映射 */
 const ROLE_EMOJI: Record<RoleId, string> = {
   villager: '👤',
   seer: '🔮',
@@ -23,9 +36,7 @@ const ROLE_EMOJI: Record<RoleId, string> = {
   mechanical_wolf: '🤖🐺',
 };
 
-/**
- * 角色风味文本
- */
+/** 角色风味文本 */
 const FLAVOR_TEXT: Record<RoleId, string> = {
   villager: '你是村庄的守护者，用智慧和投票消灭狼人……',
   seer: '你拥有洞察真相的力量，每晚可查验一人的身份……',
@@ -42,10 +53,7 @@ const FLAVOR_TEXT: Record<RoleId, string> = {
   mechanical_wolf: '你是机械造物，首夜选择模仿目标，次夜释放模仿技能……',
 };
 
-/**
- * 角色揭示组件
- * 游戏开始时显示一次，玩家确认后不再出现
- */
+/** 角色揭示组件，游戏开始时显示一次，玩家确认后不再出现 */
 export default function RoleReveal() {
   const playerState = useGameStore((s) => s.playerState);
   const roleConfirmed = useGameStore((s) => s.roleConfirmed);

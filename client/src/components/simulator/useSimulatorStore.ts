@@ -1,14 +1,17 @@
 /**
  * ============================================================================
- * 狼人杀模拟器 — Zustand 全局状态仓库
+ * simulator/useSimulatorStore — 模拟器 Zustand 全局状态仓库
  * ============================================================================
  *
- * 管理多个 WebSocket 连接（1 法官 + N 玩家），提供模拟器的完整状态管理。
- * 核心职责：
+ * 架构说明：
  *   1. 多连接 WebSocket 生命周期管理
  *   2. 服务端消息的接收与状态同步
  *   3. 自动策略建议与执行
  *   4. 事件日志记录
+ *
+ * 设计原则：
+ *   - 单一 store 管理所有模拟器连接和状态
+ *   - 通过 storeInjector 将状态桥接到 useGameStore 复用游戏组件
  * ============================================================================
  */
 
@@ -63,10 +66,7 @@ import { injectStateToGameStore, clearInjectedState, updateGameStoreFromMessage 
 // ============================================================================
 
 /** 每个连接的心跳 interval ID，用于清理 */
-const heartbeatTimers: Map<string, ReturnType<typeof setInterval>> = new Map();
-
-/** 自动执行定时器追踪 */
-const autoExecuteTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+const heartbeatTimers: Map<string, { interval: ReturnType<typeof setInterval>; updatePongTime: () => void }> = new Map();
 
 // ============================================================================
 // Store 状态接口
@@ -123,14 +123,14 @@ interface SimulatorState {
 function clearHeartbeat(key: string): void {
   const timer = heartbeatTimers.get(key);
   if (timer !== undefined) {
-    clearInterval(timer);
+    clearInterval(timer.interval);
     heartbeatTimers.delete(key);
   }
 }
 
 /** 清理所有心跳定时器 */
 function clearAllHeartbeats(): void {
-  heartbeatTimers.forEach((timer) => clearInterval(timer));
+  heartbeatTimers.forEach((timer) => clearInterval(timer.interval));
   heartbeatTimers.clear();
 }
 
@@ -197,6 +197,7 @@ function pickRandomGoodSeat(players: Player[]): number | null {
 // Zustand Store 创建
 // ============================================================================
 
+/** 模拟器全局状态仓库，管理多连接 WebSocket、自动策略和事件日志 */
 export const useSimulatorStore = create<SimulatorState>((set, get) => ({
   // ---- 初始状态 ----
   connections: new Map(),
@@ -286,20 +287,7 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
     };
 
     ws.onerror = () => {
-      // Bug 113 修复：出错时正确关闭连接
-      closeConnection(ws);
-      clearHeartbeat('__judge__');
-      set((s) => {
-        if (s.judgeConnection?.ws !== ws) return s;
-        return {
-          judgeConnection: s.judgeConnection
-            ? { ...s.judgeConnection, isConnected: false, ws: null }
-            : null,
-          error: '法官连接发生错误',
-        };
-      });
-      // Bug 165 修复：onerror 时触发 onclose 清理逻辑
-      ws.onclose?.(new CloseEvent('close'));
+      set({ error: '法官连接发生错误' });
     };
 
     ws.onclose = () => {
@@ -393,32 +381,7 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
     };
 
     ws.onerror = () => {
-      // Bug 113 修复：出错时正确关闭连接
-      closeConnection(ws);
-      // Bug 143 修复：onerror 时清理心跳并更新连接状态
-      const currentState = get();
-      let playerId: string | null = null;
-      for (const [id, c] of currentState.connections) {
-        if (c.ws === ws) {
-          playerId = id;
-          break;
-        }
-      }
-      if (playerId) {
-        clearHeartbeat(playerId);
-      }
-      set((s) => {
-        const next = new Map(s.connections);
-        if (playerId) {
-          const c = next.get(playerId);
-          if (c) {
-            next.set(playerId, { ...c, isConnected: false, ws: null });
-          }
-        }
-        return { connections: next, error: `玩家 ${nickname} 连接发生错误` };
-      });
-      // Bug 165 修复：onerror 时触发 onclose 清理逻辑
-      ws.onclose?.(new CloseEvent('close'));
+      set({ error: `玩家 ${nickname} 连接发生错误` });
     };
 
     ws.onclose = () => {
@@ -433,12 +396,6 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
       }
       if (playerId) {
         clearHeartbeat(playerId);
-        // Bug 170 修复：清理自动执行定时器
-        const timer = autoExecuteTimers.get(playerId);
-        if (timer !== undefined) {
-          clearTimeout(timer);
-          autoExecuteTimers.delete(playerId);
-        }
         set((s) => {
           const next = new Map(s.connections);
           const c = next.get(playerId);
@@ -465,14 +422,7 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
     closeConnection(conn.ws);
     clearHeartbeat(playerId);
 
-    // Bug 170 修复：清理自动执行定时器
-    const timer = autoExecuteTimers.get(playerId);
-    if (timer !== undefined) {
-      clearTimeout(timer);
-      autoExecuteTimers.delete(playerId);
-    }
-
-    // 从状态中移除（Bug 166 修复：同时清除 suggestedAction）
+    // 从状态中移除
     set((s) => {
       const next = new Map(s.connections);
       next.delete(playerId);
@@ -572,15 +522,10 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
   },
 
   setAutoMode: (mode: AutoMode) => {
-    set((s) => {
-      // Bug 167 修复：深拷贝 autoStrategies 再修改
-      const strategies = JSON.parse(JSON.stringify(s.autoStrategies)) as AutoStrategies;
-      strategies.mode = mode;
-      return {
-        autoMode: mode,
-        autoStrategies: strategies,
-      };
-    });
+    set((s) => ({
+      autoMode: mode,
+      autoStrategies: { ...s.autoStrategies, mode },
+    }));
   },
 
   setAutoStrategy: (roleId: string, strategy: Record<string, unknown>) => {
@@ -716,9 +661,8 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
             } else if (witchStrat.poisonPriority === 'evil_first') {
               poisonTarget = pickRandomEvilSeat(judgeState.players);
             } else if (witchStrat.poisonPriority === 'custom' && witchStrat.customPoisonTargets?.length) {
-              // Bug 115 修复：验证自定义毒药目标是否在可用列表中
               const available = witchStrat.customPoisonTargets.filter(
-                (s) => typeof s === 'number' && request.availableTargets.includes(s) && !request.disabledTargets.includes(s),
+                (s) => request.availableTargets.includes(s) && !request.disabledTargets.includes(s),
               );
               poisonTarget = available.length > 0 ? available[0] : null;
             }
@@ -776,8 +720,7 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
 
       case 'werewolf':
       case 'white_wolf_king':
-      case 'wolf_king':
-      case 'hidden_wolf': {
+      case 'wolf_king': {
         const wolfStrat = strategies.werewolf;
         let targetSeat: number | null = null;
 
@@ -799,14 +742,10 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
               : null;
           }
         } else if (wolfStrat.killStrategy === 'custom' && wolfStrat.customTarget !== undefined) {
-          // Bug 116 修复：防御性检查 customTarget 是否为有效数字
-          const custom = wolfStrat.customTarget;
-          if (typeof custom === 'number' && request.availableTargets.includes(custom) &&
-            !request.disabledTargets.includes(custom)) {
-            targetSeat = custom;
-          } else {
-            targetSeat = null;
-          }
+          targetSeat = request.availableTargets.includes(wolfStrat.customTarget) &&
+            !request.disabledTargets.includes(wolfStrat.customTarget)
+            ? wolfStrat.customTarget
+            : null;
         }
 
         return {
@@ -897,10 +836,6 @@ export const useSimulatorStore = create<SimulatorState>((set, get) => ({
 
     // 清理所有心跳
     clearAllHeartbeats();
-
-    // 清理所有自动执行定时器
-    autoExecuteTimers.forEach((timer) => clearTimeout(timer));
-    autoExecuteTimers.clear();
 
     // 重置状态
     set({
@@ -1003,9 +938,8 @@ function handleJudgeMessage(msg: ServerMessage, ws: WebSocket): void {
     case 'PHASE_CHANGE': {
       store.setState({
         currentPhase: msg.phase,
-        // Bug 114 修复：提供默认值防止 undefined
-        currentRound: msg.round ?? 0,
-        nightSubPhase: msg.nightSubPhase ?? null,
+        currentRound: msg.round,
+        nightSubPhase: msg.nightSubPhase,
         simulatorPhase: deriveSimulatorPhase(msg.phase),
       });
 
@@ -1124,7 +1058,7 @@ function handleJudgeMessage(msg: ServerMessage, ws: WebSocket): void {
       break;
   }
 
-  // Sync judge messages to useGameStore when in judge view (selectedPlayerId === null)
+  // 法官视角时（selectedPlayerId === null），同步法官消息到 useGameStore
   const currentState = store.getState();
   if (currentState.selectedPlayerId === null) {
     updateGameStoreFromMessage(msg);
@@ -1245,20 +1179,12 @@ function handlePlayerMessage(playerId: string, msg: ServerMessage, ws: WebSocket
 
           // 如果是全自动模式，延迟执行
           if (state.autoMode === 'auto') {
-            // Bug 170 修复：清除之前的自动执行定时器
-            if (autoExecuteTimers.has(playerId)) {
-              clearTimeout(autoExecuteTimers.get(playerId));
-            }
             // 延迟一小段时间再执行，模拟思考时间
-            const timer = setTimeout(() => {
-              autoExecuteTimers.delete(playerId);
+            setTimeout(() => {
               const currentState = store.getState();
-              // Bug 112 修复：执行前再次检查自动模式是否仍为 auto 且连接仍然可用
+              // 执行前再次检查自动模式是否仍为 auto
               if (currentState.autoMode !== 'auto') return;
-              // Bug 169 修复：验证当前阶段是否仍为夜间
-              if (currentState.currentPhase !== 'NIGHT') return;
               const currentConn = currentState.connections.get(playerId);
-              // Bug 142 修复：检查连接是否仍然活跃
               if (currentConn?.suggestedAction && currentConn.ws && currentConn.isConnected) {
                 sendMessage(currentConn.ws, currentConn.suggestedAction);
                 store.setState((s) => {
@@ -1271,7 +1197,6 @@ function handlePlayerMessage(playerId: string, msg: ServerMessage, ws: WebSocket
                 });
               }
             }, 500 + Math.random() * 1000);
-            autoExecuteTimers.set(playerId, timer);
           }
         }
       }
@@ -1367,7 +1292,7 @@ function handlePlayerMessage(playerId: string, msg: ServerMessage, ws: WebSocket
       break;
   }
 
-  // Sync message to useGameStore if this player is currently selected
+  // 当前选中的玩家消息同步到 useGameStore
   const currentState = store.getState();
   if (currentState.selectedPlayerId === playerId) {
     updateGameStoreFromMessage(msg);
@@ -1386,7 +1311,7 @@ function deriveSimulatorPhase(phase: GamePhase): SimulatorPhase {
     case 'GAME_OVER':
       return 'gameover';
     default:
-      // ROLE_REVEAL, PRE_NIGHT, NIGHT, NIGHT_SETTLEMENT, DAY_ANNOUNCE, etc.
+      // 其他阶段（ROLE_REVEAL、PRE_NIGHT、NIGHT 等）视为游戏中
       return 'playing';
   }
 }

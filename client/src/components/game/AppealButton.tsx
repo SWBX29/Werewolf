@@ -1,6 +1,24 @@
+/**
+ * ============================================================================
+ * AppealButton — 申诉与仲裁投票组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 提供申诉入口按钮，玩家可对争议事件发起仲裁请求
+ *   2. 展开申诉面板，显示事件描述与自动附加材料
+ *   3. 仲裁投票面板，允许其他玩家对法官裁决进行支持或驳回
+ *
+ * 设计原则：
+ *   - 申诉与仲裁互斥显示，同一时刻仅展示一个面板
+ *   - 仲裁投票仅可操作一次，投票后锁定
+ *   - 面板浮动定位在右下角，不遮挡主界面
+ * ============================================================================
+ */
+
 import React, { useState } from 'react';
 import { useGameStore } from '../../useGameStore';
 
+/** 申诉与仲裁投票组件，提供争议事件的申诉提交和仲裁投票功能 */
 const AppealButton: React.FC = () => {
   const appealEvent = useGameStore((s) => s.appealEvent);
   const showArbitration = useGameStore((s) => s.showArbitration);
@@ -10,8 +28,10 @@ const AppealButton: React.FC = () => {
   const [isExpanded, setIsExpanded] = useState(false);
   const [arbitrationVoted, setArbitrationVoted] = useState(false);
 
+  // 无申诉事件且无仲裁面板时，不渲染
   if (!appealEvent && !showArbitration) return null;
 
+  /** 提交申诉请求 */
   const handleSubmitAppeal = () => {
     if (!appealEvent) return;
     sendMessage({
@@ -21,6 +41,7 @@ const AppealButton: React.FC = () => {
     setIsExpanded(false);
   };
 
+  /** 提交仲裁投票（支持或驳回法官裁决） */
   const handleArbitrationVote = (support: boolean) => {
     if (!arbitrationEvent || arbitrationVoted) return;
     sendMessage({

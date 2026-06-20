@@ -1,10 +1,9 @@
 /**
  * ============================================================================
- * 狼人杀联机游戏 — 大厅与房间管理器 (Lobby Manager)
+ * 大厅管理器 — 房间生命周期与连接映射
  * ============================================================================
  *
  * 架构说明：
- *   LobbyManager 负责房间的生命周期管理，包括：
  *   1. 密码学安全随机生成6位房间码
  *   2. 创建/销毁房间
  *   3. 加入/离开房间的握手逻辑
@@ -37,8 +36,6 @@ import {
   ROOM_CODE_LENGTH,
   createDefaultRuleConfig,
   isEvilRole,
-  hasNightAction,
-  VALID_ROLE_ID_SET,
 } from '@langrensha/shared';
 import { GameEngine, VoteResultCallback, GameOverCallback, IdentityRevealCallback } from './GameEngine.js';
 import { WolfChatLogModel, isMongoConnected } from './models.js';
@@ -53,20 +50,32 @@ import { WolfChatLogModel, isMongoConnected } from './models.js';
  * 使用 Node.js 内置 crypto.randomBytes 作为熵源，
  * 确保房间码不可预测、不可碰撞。
  * 字符集排除易混淆字符（0/O, 1/I/L）。
+ *
+ * @returns 6位房间码字符串
  */
 export function generateRoomCode(): string {
   const charset = ROOM_CODE_CHARSET;
   const charsetLen = charset.length;
+  // 拒绝采样的阈值：256 / charsetLen 向下取整 * charsetLen
+  // 超出此阈值的字节值被拒绝，确保均匀分布
+  const threshold = Math.floor(256 / charsetLen) * charsetLen;
   let code = '';
 
-  // 使用密码学安全随机数
-  const randomBytes = crypto.randomBytes(ROOM_CODE_LENGTH * 2); // 多取一些字节确保均匀分布
+  const randomBytes = crypto.randomBytes(ROOM_CODE_LENGTH * 3);
 
+  let byteIndex = 0;
   for (let i = 0; i < ROOM_CODE_LENGTH; i++) {
-    // 使用拒绝采样法确保均匀分布
-    const byte = randomBytes[i];
-    const index = byte % charsetLen;
-    code += charset[index];
+    let byte: number;
+    do {
+      byte = randomBytes[byteIndex++];
+      // 如果字节用完，重新生成一批
+      if (byteIndex >= randomBytes.length) {
+        const newBytes = crypto.randomBytes(ROOM_CODE_LENGTH * 3);
+        for (let j = 0; j < newBytes.length; j++) randomBytes[j] = newBytes[j];
+        byteIndex = 0;
+      }
+    } while (byte >= threshold);
+    code += charset[byte % charsetLen];
   }
 
   return code;
@@ -150,7 +159,10 @@ export class LobbyManager {
 
   /**
    * 生成唯一玩家 ID
+   *
    * 格式：p_自增计数器_随机后缀
+   *
+   * @returns 唯一玩家 ID 字符串
    */
   private generatePlayerId(): string {
     this.playerIdCounter++;
@@ -160,7 +172,12 @@ export class LobbyManager {
 
   /**
    * 生成唯一房间码
-   * 确保与现有房间码不冲突（极低概率，但仍需检查）
+   *
+   * 确保与现有房间码不冲突（极低概率，但仍需检查），
+   * 最多尝试 100 次。
+   *
+   * @returns 唯一房间码字符串
+   * @throws 当超过最大尝试次数时抛出异常
    */
   private generateUniqueRoomCode(): string {
     let code: string;
@@ -184,7 +201,12 @@ export class LobbyManager {
 
   /**
    * 注册新的 WebSocket 连接
-   * 在 WebSocket 握手成功后调用
+   *
+   * 在 WebSocket 握手成功后调用，为连接分配唯一玩家 ID。
+   *
+   * @param ws - WebSocket 连接实例
+   * @param origin - 连接来源（用于生成邀请链接）
+   * @returns 客户端连接上下文
    */
   registerConnection(ws: any, origin = ''): ClientContext {
     const playerId = this.generatePlayerId();
@@ -209,7 +231,12 @@ export class LobbyManager {
 
   /**
    * 注销 WebSocket 连接
-   * 在连接断开时调用，标记玩家为断连状态，给予宽限期等待重连
+   *
+   * 在连接断开时调用，标记玩家为断连状态，给予 60 秒宽限期等待重连。
+   * LOBBY 阶段超时后移除玩家，游戏进行中则保留断连状态等待昵称重连。
+   *
+   * @param ws - 断开的 WebSocket 连接
+   * @returns 房间码和玩家 ID
    */
   unregisterConnection(ws: any): { roomCode: string | null; playerId: string } {
     const playerId = this.wsToPlayerId.get(ws);
@@ -268,7 +295,14 @@ export class LobbyManager {
 
   /**
    * 玩家重连 — 使用之前的 playerId 恢复会话
-   * 返回旧 context 和新 context 的 playerId，以便调用方清理新 context
+   *
+   * 清除宽限期定时器，恢复连接状态，更新 WebSocket 映射。
+   * 如果旧连接仍标记为"已连接"（TCP 半开连接），强制替换为新连接。
+   *
+   * @param playerId - 原玩家 ID
+   * @param roomCode - 房间码
+   * @param newWs - 新的 WebSocket 连接
+   * @returns 重连结果，包含恢复的上下文和需清理的临时 playerId
    */
   reconnectPlayer(playerId: string, roomCode: string, newWs: any): { success: boolean; error?: string; context?: ClientContext; newPlayerId?: string } {
     const context = this.clients.get(playerId);
@@ -319,7 +353,11 @@ export class LobbyManager {
   }
 
   /**
-   * 删除指定 playerId 的 ClientContext（用于重连时清理新创建的临时 context）
+   * 删除指定 playerId 的 ClientContext
+   *
+   * 用于重连时清理新创建的临时 context。
+   *
+   * @param playerId - 要删除的玩家 ID
    */
   removeClientContext(playerId: string): void {
     const ctx = this.clients.get(playerId);
@@ -338,6 +376,9 @@ export class LobbyManager {
 
   /**
    * 根据玩家 ID 获取客户端上下文
+   *
+   * @param playerId - 玩家 ID
+   * @returns 客户端上下文，未找到则返回 undefined
    */
   getClient(playerId: string): ClientContext | undefined {
     return this.clients.get(playerId);
@@ -345,6 +386,9 @@ export class LobbyManager {
 
   /**
    * 根据 WebSocket 获取客户端上下文
+   *
+   * @param ws - WebSocket 连接实例
+   * @returns 客户端上下文，未找到则返回 undefined
    */
   getClientByWs(ws: any): ClientContext | undefined {
     const playerId = this.wsToPlayerId.get(ws);
@@ -360,15 +404,18 @@ export class LobbyManager {
    * 创建房间
    *
    * 流程：
-   * 1. 生成唯一房间码
-   * 2. 初始化 RoomState
-   * 3. 创建 GameEngine 实例
-   * 4. 将房主/法官添加到房间
+   * 1. 校验昵称和配置
+   * 2. 生成唯一房间码
+   * 3. 初始化 RoomState
+   * 4. 创建 GameEngine 实例
+   * 5. 将房主/法官添加到房间
    *
    * @param hostNickname - 房主昵称
    * @param gameMode - 游戏模式（HUMAN/SYSTEM）
    * @param config - 村规配置
    * @param hostWs - 房主的 WebSocket 连接
+   * @param origin - 连接来源（用于生成邀请链接）
+   * @returns 创建结果，包含房间码、邀请链接和玩家 ID
    */
   createRoom(
     hostNickname: string,
@@ -389,11 +436,6 @@ export class LobbyManager {
     const configValidation = this.validateRuleConfig(config);
     if (!configValidation.valid) {
       return { success: false, error: configValidation.error };
-    }
-
-    // 校验玩家数量合理性
-    if (config.playerCount < 6 || config.playerCount > 18) {
-      return { success: false, error: '玩家数量必须在6-18之间' };
     }
 
     // 生成唯一房间码
@@ -428,13 +470,13 @@ export class LobbyManager {
       wolfChatMessages: [],
       nightDeaths: [],
       dayDeaths: [],
-      pendingDeathSkills: [],
       isPaused: false,
       winner: null,
       createdAt: Date.now(),
       startedAt: null,
       endedAt: null,
       configVersion: 10,
+      pendingDeathSkill: null,
     };
 
     // 创建 GameEngine 实例
@@ -502,7 +544,6 @@ export class LobbyManager {
       idiotRevealed: false,
       hunterGunFired: false,
       wolfKingGunFired: false,
-      knightHasDueled: false,
       deathCause: null,
       deathRound: null,
     };
@@ -562,10 +603,16 @@ export class LobbyManager {
    * 加入房间
    *
    * 校验流程：
-   * 1. 房间是否存在
-   * 2. 房间是否已满
+   * 1. 昵称和房间码格式校验
+   * 2. 房间是否存在
    * 3. 游戏是否已开始
-   * 4. 昵称是否重复
+   * 4. 房间是否已满
+   * 5. 昵称是否重复（大小写不敏感）
+   *
+   * @param nickname - 玩家昵称
+   * @param roomCode - 房间码
+   * @param playerWs - 玩家的 WebSocket 连接
+   * @returns 加入结果，包含玩家 ID 和座位号
    */
   joinRoom(
     nickname: string,
@@ -644,7 +691,7 @@ export class LobbyManager {
       id: contextPlayerId,
       nickname: nickname.trim(),
       seatNumber,
-      role: 'villager', // 占位值，游戏开始时随机分配实际角色
+      role: 'villager', // 默认值，游戏开始时随机分配
       status: 'alive',
       isJudge: false,
       isSheriff: false,
@@ -665,7 +712,6 @@ export class LobbyManager {
       idiotRevealed: false,
       hunterGunFired: false,
       wolfKingGunFired: false,
-      knightHasDueled: false,
       deathCause: null,
       deathRound: null,
     };
@@ -700,16 +746,13 @@ export class LobbyManager {
   /**
    * 通过昵称+房间号重新加入游戏
    *
-   * 场景：玩家异常退出（浏览器崩溃、误关页面等）后，重新输入相同昵称和房间号
-   * 如果房间中存在同昵称的断连玩家，则自动重连恢复
+   * 场景：玩家异常退出（浏览器崩溃、误关页面等）后，重新输入相同昵称和房间号。
+   * 如果房间中存在同昵称的断连玩家，则自动重连恢复。
    *
-   * 返回值：
-   * - success: 是否成功
-   * - reconnected: 是否为重连（true）还是新加入（false）
-   * - playerId: 玩家 ID
-   * - roomCode: 房间码
-   * - phase: 当前游戏阶段
-   * - newPlayerId: 需要清理的临时 context 的 playerId
+   * @param nickname - 玩家昵称
+   * @param roomCode - 房间码
+   * @param playerWs - 玩家的 WebSocket 连接
+   * @returns 重连结果，包含是否重连、玩家 ID、房间码、游戏阶段和需清理的临时 playerId
    */
   rejoinByNickname(
     nickname: string,
@@ -810,6 +853,12 @@ export class LobbyManager {
 
   /**
    * 离开房间
+   *
+   * LOBBY 阶段直接移除玩家，游戏进行中仅标记断线。
+   * 房主离开时自动转移房主权限，房间为空时销毁房间。
+   *
+   * @param playerId - 玩家 ID
+   * @returns 离开结果，包含房间码
    */
   leaveRoom(playerId: string): { success: boolean; error?: string; roomCode?: string } {
     const context = this.clients.get(playerId);
@@ -906,8 +955,8 @@ export class LobbyManager {
   /**
    * 法官解散房间 — 销毁房间，返回所有玩家信息供广播
    *
-   * 注意：调用方需负责向所有房间内客户端（包括法官）广播 ROOM_DISSOLVED 消息。
-   * 断连客户端的 ws 为 null，无法即时通知，重连时需处理房间不存在的情况。
+   * @param playerId - 法官玩家 ID
+   * @returns 解散结果，包含房间码和玩家信息列表
    */
   dissolveRoom(playerId: string): { success: boolean; error?: string; roomCode?: string; players?: Array<{ seatNumber: number; nickname: string; role: RoleId | null; status: PlayerStatus | null }> } {
     const context = this.clients.get(playerId);
@@ -952,14 +1001,15 @@ export class LobbyManager {
       this.roomClientsIndex.delete(roomCode);
     }
 
-    // 通知所有玩家房间已解散
-    this.onRoomDissolvedCallback?.(roomCode, players);
-
     return { success: true, roomCode, players };
   }
 
   /**
    * 玩家准备/取消准备
+   *
+   * @param playerId - 玩家 ID
+   * @param ready - 是否准备
+   * @returns 操作结果
    */
   setReady(playerId: string, ready: boolean): { success: boolean; error?: string } {
     const context = this.clients.get(playerId);
@@ -1005,60 +1055,15 @@ export class LobbyManager {
     return { success: true };
   }
 
-  /**
-   * 校验房间是否满足开始游戏条件
-   * 在 START_GAME 之前调用，提供额外的验证层
-   */
-  canStartGame(roomCode: string): { canStart: boolean; error?: string } {
-    const engine = this.rooms.get(roomCode);
-    if (!engine) {
-      return { canStart: false, error: '房间不存在' };
-    }
-
-    const state = engine.getState() as RoomState;
-
-    if (state.phase !== 'LOBBY') {
-      return { canStart: false, error: '游戏已开始' };
-    }
-
-    const nonJudgePlayers = state.players.filter((p) => !p.isJudge);
-
-    // 校验玩家数量与配置一致
-    if (nonJudgePlayers.length !== state.config.playerCount) {
-      return { canStart: false, error: `当前玩家数(${nonJudgePlayers.length})与配置人数(${state.config.playerCount})不匹配` };
-    }
-
-    // 校验所有玩家已准备
-    const notReady = nonJudgePlayers.filter((p) => !p.isReady);
-    if (notReady.length > 0) {
-      return { canStart: false, error: `${notReady.map((p) => `${p.seatNumber}号 ${p.nickname}`).join('、')} 尚未准备` };
-    }
-
-    // 校验角色分配总数
-    const totalRoles = Object.values(state.config.roleDistribution).reduce((sum, count) => sum + (count || 0), 0);
-    if (totalRoles !== nonJudgePlayers.length) {
-      return { canStart: false, error: `角色分配总数(${totalRoles})与玩家数(${nonJudgePlayers.length})不匹配` };
-    }
-
-    // 校验 sharedWolfRoles 中的角色在 roleDistribution 中存在且数量大于0
-    if (state.config.sharedWolfRoles && state.config.sharedWolfRoles.length > 0) {
-      for (const role of state.config.sharedWolfRoles) {
-        const count = state.config.roleDistribution[role as RoleId];
-        if (!count || count <= 0) {
-          return { canStart: false, error: `sharedWolfRoles 中的角色 ${role} 在角色分配中不存在或数量为0` };
-        }
-      }
-    }
-
-    return { canStart: true };
-  }
-
   // ==========================================================================
   // 房间查询
   // ==========================================================================
 
   /**
    * 获取房间引擎
+   *
+   * @param roomCode - 房间码
+   * @returns GameEngine 实例，未找到则返回 undefined
    */
   getRoom(roomCode: string): GameEngine | undefined {
     return this.rooms.get(roomCode);
@@ -1066,6 +1071,9 @@ export class LobbyManager {
 
   /**
    * 获取房间中的所有客户端
+   *
+   * @param roomCode - 房间码
+   * @returns 客户端上下文数组
    */
   getRoomClients(roomCode: string): ClientContext[] {
     const playerIds = this.roomClientsIndex.get(roomCode);
@@ -1080,6 +1088,8 @@ export class LobbyManager {
 
   /**
    * 获取活跃房间数量
+   *
+   * @returns 房间数量
    */
   getRoomCount(): number {
     return this.rooms.size;
@@ -1087,6 +1097,8 @@ export class LobbyManager {
 
   /**
    * 获取在线玩家数量
+   *
+   * @returns 在线玩家数量
    */
   getOnlineCount(): number {
     return this.clients.size;
@@ -1094,8 +1106,12 @@ export class LobbyManager {
 
   /**
    * LOBBY 阶段掉线检查
+   *
    * 遍历所有处于 LOBBY 阶段的房间，检查每个玩家是否已断连，
-   * 如果断连则立即移除（不等待宽限期），并返回被移除的玩家信息供广播
+   * 如果断连则立即移除（不等待宽限期），并返回被移除的玩家信息供广播。
+   * 快照恢复后的宽限期内不执行清理。
+   *
+   * @returns 被移除的玩家信息列表
    */
   checkLobbyDisconnectedPlayers(): Array<{ roomCode: string; playerId: string; seatNumber: number; nickname: string }> {
     const removed: Array<{ roomCode: string; playerId: string; seatNumber: number; nickname: string }> = [];
@@ -1151,6 +1167,11 @@ export class LobbyManager {
 
   /**
    * 校验 RuleConfig 的合法性
+   *
+   * 校验项：配置非空、玩家数量范围、角色分配总数、狼人数量合理性、夜间行动顺序。
+   *
+   * @param config - 村规配置
+   * @returns 校验结果，包含是否合法和错误信息
    */
   private validateRuleConfig(config: RuleConfig): { valid: boolean; error?: string } {
     if (!config) {
@@ -1190,29 +1211,6 @@ export class LobbyManager {
     // 校验夜间行动顺序
     if (!config.nightActionOrder || config.nightActionOrder.length === 0) {
       return { valid: false, error: '夜间行动顺序不能为空' };
-    }
-
-    // 校验 sharedWolfRoles 中的角色在 roleDistribution 中存在
-    if (config.sharedWolfRoles && config.sharedWolfRoles.length > 0) {
-      const rdKeys = new Set(Object.keys(config.roleDistribution));
-      for (const role of config.sharedWolfRoles) {
-        if (!VALID_ROLE_ID_SET.has(role)) {
-          return { valid: false, error: `sharedWolfRoles 包含非法角色ID: ${role}` };
-        }
-        if (!rdKeys.has(role) || !config.roleDistribution[role as RoleId]) {
-          return { valid: false, error: `sharedWolfRoles 中的角色 ${role} 在 roleDistribution 中不存在或数量为0` };
-        }
-      }
-    }
-
-    // 校验 nightActionOrder 包含所有拥有夜间行动的角色
-    if (config.nightActionOrder && config.roleDistribution) {
-      const orderSet = new Set(config.nightActionOrder);
-      for (const [role, count] of Object.entries(config.roleDistribution)) {
-        if (count && count > 0 && hasNightAction(role as RoleId) && !orderSet.has(role as RoleId)) {
-          return { valid: false, error: `nightActionOrder 缺少拥有夜间行动的角色: ${role}` };
-        }
-      }
     }
 
     return { valid: true };
@@ -1260,10 +1258,11 @@ export class LobbyManager {
   private voteResultCallback: VoteResultCallback = () => {};
   private gameOverCallback: GameOverCallback = () => {};
   private identityRevealCallback: IdentityRevealCallback = () => {};
-  private onRoomDissolvedCallback: ((roomCode: string, players: Array<{ seatNumber: number; nickname: string; role: RoleId | null; status: PlayerStatus | null }>) => void) | null = null;
 
   /**
    * 设置日志回调
+   *
+   * @param cb - 日志回调函数
    */
   setLogCallback(cb: (log: any) => void): void {
     this.onLogCallback = cb;
@@ -1271,6 +1270,8 @@ export class LobbyManager {
 
   /**
    * 设置法官警告回调
+   *
+   * @param cb - 法官警告回调函数
    */
   setJudgeWarningCallback(cb: (roomCode: string, type: any, msg: string, data: any) => void): void {
     this.onJudgeWarningCallback = cb;
@@ -1278,6 +1279,8 @@ export class LobbyManager {
 
   /**
    * 设置阶段变更回调
+   *
+   * @param cb - 阶段变更回调函数
    */
   setPhaseChangeCallback(cb: (roomCode: string, phase: any, subPhase: any, round: number) => void): void {
     this.onPhaseChangeCallback = cb;
@@ -1285,6 +1288,8 @@ export class LobbyManager {
 
   /**
    * 设置狼人聊天回调
+   *
+   * @param cb - 狼人聊天回调函数
    */
   setWolfChatCallback(cb: (roomCode: string, message: WolfChatMessage) => void): void {
     this.onWolfChatCallback = cb;
@@ -1292,6 +1297,8 @@ export class LobbyManager {
 
   /**
    * 设置阶段提醒回调
+   *
+   * @param cb - 阶段提醒回调函数
    */
   setPhaseReminderCallback(cb: (roomCode: string, roleId: RoleId, round: number, actorSeats: number[], timeout: number) => void): void {
     this.onPhaseReminderCallback = cb;
@@ -1299,6 +1306,8 @@ export class LobbyManager {
 
   /**
    * 设置狼人投票更新回调
+   *
+   * @param cb - 狼人投票更新回调函数
    */
   setWolfVoteUpdateCallback(cb: (roomCode: string, votes: Record<number, number>, consensus: boolean, lockedTarget: number | null) => void): void {
     this.onWolfVoteUpdateCallback = cb;
@@ -1306,6 +1315,8 @@ export class LobbyManager {
 
   /**
    * 设置游戏事件回调
+   *
+   * @param cb - 游戏事件回调函数
    */
   setGameEventCallback(cb: (roomCode: string, eventType: string, data: Record<string, unknown>) => void): void {
     this.onGameEventCallback = cb;
@@ -1313,6 +1324,8 @@ export class LobbyManager {
 
   /**
    * 设置夜间子阶段推进回调
+   *
+   * @param cb - 夜间子阶段推进回调函数
    */
   setNightSubPhaseAdvanceCallback(cb: (roomCode: string) => void): void {
     this.onNightSubPhaseAdvanceCallback = cb;
@@ -1320,6 +1333,8 @@ export class LobbyManager {
 
   /**
    * 设置夜间倒计时广播回调
+   *
+   * @param cb - 夜间倒计时回调函数
    */
   setNightCountdownCallback(cb: (roomCode: string, roleId: import('@langrensha/shared').RoleId, remaining: number) => void): void {
     this.onNightCountdownCallback = cb;
@@ -1327,6 +1342,8 @@ export class LobbyManager {
 
   /**
    * 设置发言倒计时广播回调
+   *
+   * @param cb - 发言倒计时回调函数
    */
   setSpeechCountdownCallback(cb: (roomCode: string, seatNumber: number, remaining: number) => void): void {
     this.onSpeechCountdownCallback = cb;
@@ -1334,15 +1351,19 @@ export class LobbyManager {
 
   /**
    * 设置天亮公告回调
+   *
+   * @param cb - 天亮公告回调函数
    */
   setDayAnnounceCallback(cb: (roomCode: string, deaths: Array<{seatNumber: number; nickname: string; cause: string}>, mutedSeats: number[]) => void): void {
     this.onDayAnnounceCallback = cb;
   }
 
+  /** 设置投票结果回调 */
   setVoteResultCallback(cb: VoteResultCallback): void { this.voteResultCallback = cb; }
+  /** 设置游戏结束回调 */
   setGameOverCallback(cb: GameOverCallback): void { this.gameOverCallback = cb; }
+  /** 设置身份揭示回调 */
   setIdentityRevealCallback(cb: IdentityRevealCallback): void { this.identityRevealCallback = cb; }
-  setRoomDissolvedCallback(cb: (roomCode: string, players: Array<{ seatNumber: number; nickname: string; role: RoleId | null; status: PlayerStatus | null }>) => void): void { this.onRoomDissolvedCallback = cb; }
 
   // ---- 转发方法 ----
 
@@ -1413,6 +1434,8 @@ export class LobbyManager {
 
   /**
    * 销毁所有房间，释放资源
+   *
+   * 清理所有房间引擎、客户端映射和索引。
    */
   destroyAll(): void {
     for (const engine of this.rooms.values()) {
@@ -1430,7 +1453,11 @@ export class LobbyManager {
 
   /**
    * 导出所有房间的状态快照
-   * 包含房间状态和玩家连接信息（不含 WebSocket 引用和定时器）
+   *
+   * 包含房间状态和玩家连接信息（不含 WebSocket 引用和定时器），
+   * 用于 tsx watch 热重载后恢复游戏状态。
+   *
+   * @returns 快照数据，包含房间列表、客户端列表、房间索引和计数器
    */
   exportSnapshot(): {
     rooms: Array<{ roomCode: string; state: RoomState; gameId: string }>;
@@ -1494,7 +1521,11 @@ export class LobbyManager {
 
   /**
    * 从快照恢复所有房间和客户端状态
-   * 恢复后所有客户端标记为 disconnected，等待客户端重连
+   *
+   * 恢复后所有客户端标记为 disconnected，等待客户端重连。
+   * 记录快照恢复时间，用于 LOBBY 断连检查的宽限期。
+   *
+   * @param snapshot - 快照数据
    */
   restoreFromSnapshot(snapshot: ReturnType<typeof this.exportSnapshot>): void {
     // 恢复房间

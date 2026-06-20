@@ -1,3 +1,20 @@
+/**
+ * ============================================================================
+ * NightPhase — 夜晚阶段主控组件
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 作为夜晚阶段的入口组件，根据当前行动请求的角色类型分发到对应面板
+ *   2. 管理夜晚阶段的语音连接策略（狼人密谋、法官指导、行动玩家交流等）
+ *   3. 处理被噩梦之影恐惧时的封印提示
+ *
+ * 设计原则：
+ *   - 面板按角色 ID 分发，使用懒加载减少首屏体积
+ *   - 语音策略按玩家身份（法官/狼人/行动玩家/旁观者）分级管理
+ *   - 死亡或无行动请求时统一显示等待界面
+ * ============================================================================
+ */
+
 import { useEffect, useRef, lazy } from 'react';
 import { useGameStore } from '../../../useGameStore';
 import { useVoiceStore } from '../../../store/useVoiceStore';
@@ -5,6 +22,7 @@ import { getZegoVoiceService } from '../../../services/zego';
 import { ROLE_META, isSharedWolfRole } from '@langrensha/shared';
 import type { RoleId } from '@langrensha/shared';
 import CountdownTimer from '../CountdownTimer';
+
 const NightWaiting = lazy(() => import('./NightWaiting'));
 const NightmarePanel = lazy(() => import('./NightmarePanel'));
 const WolfVotePanel = lazy(() => import('./WolfVotePanel'));
@@ -13,6 +31,12 @@ const SeerPanel = lazy(() => import('./SeerPanel'));
 const GuardPanel = lazy(() => import('./GuardPanel'));
 const MechanicalWolfPanel = lazy(() => import('./MechanicalWolfPanel'));
 
+/**
+ * 夜晚阶段主控组件
+ *
+ * 根据当前夜间行动请求的角色类型，渲染对应的面板组件；
+ * 同时管理夜晚阶段的语音连接策略，确保不同身份的玩家获得正确的语音权限。
+ */
 export default function NightPhase() {
   const playerState = useGameStore((s) => s.playerState);
   const roleConfirmed = useGameStore((s) => s.roleConfirmed);
@@ -26,7 +50,7 @@ export default function NightPhase() {
   const setVoiceStatusHint = useVoiceStore((s) => s.setVoiceStatusHint);
   const leaveVoiceRoom = useVoiceStore((s) => s.leaveVoiceRoom);
 
-  // 追踪上一次语音操作，避免 cleanup 时恢复到错误状态
+  // 追踪上一次语音操作类型，用于 cleanup 时判断是否需要恢复语音状态
   const prevVoiceActionRef = useRef<'stay' | 'leave' | null>(null);
 
   // 夜晚阶段语音连接管理策略
@@ -39,13 +63,13 @@ export default function NightPhase() {
     const nightActionRequest = playerState.nightActionRequest;
     const sharedWolfRoles = ruleConfig?.sharedWolfRoles || ['werewolf', 'white_wolf_king', 'wolf_king'];
 
-    // 判断玩家身份
+    // 判断玩家身份类别
     const isJudge = myPlayer.isJudge;
     const isDead = myPlayer.status !== 'alive';
     const isWolfRole = myPlayer.role ? isSharedWolfRole(myPlayer.role as RoleId, sharedWolfRoles) : false;
     const isCurrentActionPlayer = nightActionRequest && myPlayer.role === nightActionRequest.roleId;
 
-    // 死亡非法官玩家 → 断开连接，显示"夜晚休息"
+    // 死亡非法官玩家：断开语音连接，显示"夜晚休息"
     if (isDead && !isJudge) {
       prevVoiceActionRef.current = 'leave';
       leaveVoiceRoom();
@@ -55,10 +79,10 @@ export default function NightPhase() {
       return;
     }
 
-    // 判断当前是否是狼人行动阶段
+    // 判断当前是否为狼人行动阶段
     const isWolfActionPhase = nightActionRequest && isSharedWolfRole(nightActionRequest.roleId as RoleId, sharedWolfRoles);
 
-    // 狼人行动阶段 + 我是狼人 + 存活 → 保持连接，狼人可互相交流
+    // 狼人行动阶段 + 我是狼人 + 存活：保持语音连接，狼人可互相交流
     if (isWolfActionPhase && isWolfRole && myPlayer.status === 'alive') {
       prevVoiceActionRef.current = 'stay';
       setCanSpeak(true);
@@ -137,7 +161,9 @@ export default function NightPhase() {
     }
 
     return () => {
-      if (prevVoiceActionRef.current === 'stay' && useVoiceStore.getState().connectionState === 'CONNECTED') {
+      // 仅在保持连接（stay）时恢复语音状态
+      // 如果已 leaveVoiceRoom，则不恢复（避免对已退出的房间操作 SDK）
+      if (prevVoiceActionRef.current === 'stay') {
         setCanSpeak(true);
         setMicrophoneMuted(false);
         getZegoVoiceService().muteMicrophone(false);
@@ -229,7 +255,7 @@ export default function NightPhase() {
       case 'nightmare_shadow':
         return <NightmarePanel />;
       case 'werewolf':
-      // Bug 39 修复：white_wolf_king 和 wolf_king 也使用狼人投票面板
+      // 白狼王和狼王也使用狼人投票面板
       case 'white_wolf_king':
       case 'wolf_king':
         return <WolfVotePanel />;

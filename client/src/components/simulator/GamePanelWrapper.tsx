@@ -1,30 +1,48 @@
-import React, { Suspense, lazy, useMemo } from 'react';
-import { useGameStore } from '../../useGameStore';
-import { ROLE_META, PHASE_NAMES } from '@langrensha/shared';
-import type { RoleId } from '@langrensha/shared';
+/**
+ * ============================================================================
+ * GamePanelWrapper — 模拟器游戏面板包装器
+ * ============================================================================
+ *
+ * 架构说明：
+ *   1. 根据当前游戏阶段渲染对应的游戏组件（复用 game/ 目录组件）
+ *   2. 处理房间解散、游戏结束、角色揭示等优先级视图
+ *   3. 死亡玩家切换为观战模式
+ *   4. 包含大厅等待、白天中断、入夜等待、投票前等待等子面板
+ *
+ * 设计原则：
+ *   - 通过 storeInjector 桥接状态，复用 GameView 的全部子组件
+ *   - 使用 transform 创建包含块，避免 fixed 定位覆盖模拟器界面
+ * ============================================================================
+ */
+
+import React, { Suspense, lazy, useMemo } from "react";
+import { useGameStore } from "../../useGameStore";
+import { useSimulatorStore } from "./useSimulatorStore";
+import { ROLE_META, PHASE_NAMES } from "@langrensha/shared";
+import type { RoleId } from "@langrensha/shared";
 
 // 始终渲染的核心组件 — 同步导入
-import StatusBar from '../game/StatusBar';
-import PlayerList from '../game/PlayerList';
-import AppealButton from '../game/AppealButton';
-import JudgeActionToast from '../game/JudgeActionToast';
-import CountdownTimer from '../game/CountdownTimer';
+import StatusBar from "../game/StatusBar";
+import PlayerList from "../game/PlayerList";
+import AppealButton from "../game/AppealButton";
+import JudgeActionToast from "../game/JudgeActionToast";
+import CountdownTimer from "../game/CountdownTimer";
 
-// Lazy load game phase components (same as GameView)
-const RoleReveal = lazy(() => import('../game/RoleReveal'));
-const SpectatorMode = lazy(() => import('../game/SpectatorMode'));
-const NightPhase = lazy(() => import('../game/night/NightPhase'));
-const SpeechPhase = lazy(() => import('../game/day/SpeechPhase'));
-const VotePhase = lazy(() => import('../game/day/VotePhase'));
-const SheriffElection = lazy(() => import('../game/day/SheriffElection'));
-const SheriffTransfer = lazy(() => import('../game/day/SheriffTransfer'));
-const DayAnnounce = lazy(() => import('../game/day/DayAnnounce'));
-const GameOver = lazy(() => import('../game/GameOver'));
-const WhiteWolfExplode = lazy(() => import('../game/skills/WhiteWolfExplode'));
-const HunterGun = lazy(() => import('../game/skills/HunterGun'));
-const WolfKingGun = lazy(() => import('../game/skills/WolfKingGun'));
-const IdiotReveal = lazy(() => import('../game/skills/IdiotReveal'));
-const KnightDuel = lazy(() => import('../game/skills/KnightDuel'));
+// 懒加载游戏阶段组件（与 GameView 一致）
+const RoleReveal = lazy(() => import("../game/RoleReveal"));
+const SpectatorMode = lazy(() => import("../game/SpectatorMode"));
+const NightPhase = lazy(() => import("../game/night/NightPhase"));
+const SpeechPhase = lazy(() => import("../game/day/SpeechPhase"));
+const VotePhase = lazy(() => import("../game/day/VotePhase"));
+const SheriffElection = lazy(() => import("../game/day/SheriffElection"));
+const SheriffTransfer = lazy(() => import("../game/day/SheriffTransfer"));
+const DayAnnounce = lazy(() => import("../game/day/DayAnnounce"));
+const GameOver = lazy(() => import("../game/GameOver"));
+const WhiteWolfExplode = lazy(() => import("../game/skills/WhiteWolfExplode"));
+const HunterGun = lazy(() => import("../game/skills/HunterGun"));
+const WolfKingGun = lazy(() => import("../game/skills/WolfKingGun"));
+const IdiotReveal = lazy(() => import("../game/skills/IdiotReveal"));
+const KnightDuel = lazy(() => import("../game/skills/KnightDuel"));
 
 const Loading: React.FC = () => (
   <div className="flex items-center justify-center p-8">
@@ -32,6 +50,7 @@ const Loading: React.FC = () => (
   </div>
 );
 
+/** 模拟器游戏面板包装器，根据阶段渲染对应游戏组件 */
 const GamePanelWrapper: React.FC = () => {
   const playerState = useGameStore((s) => s.playerState);
   const gameOverData = useGameStore((s) => s.gameOverData);
@@ -52,7 +71,9 @@ const GamePanelWrapper: React.FC = () => {
   if (gameOverData) {
     return (
       <div className="game-panel-container flex-1 overflow-hidden relative">
-        <Suspense fallback={<Loading />}><GameOver /></Suspense>
+        <Suspense fallback={<Loading />}>
+          <GameOver />
+        </Suspense>
       </div>
     );
   }
@@ -66,28 +87,36 @@ const GamePanelWrapper: React.FC = () => {
   }
 
   const phase = playerState.phase;
-  const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
-  const isAlive = myPlayer?.status === 'alive';
+  const myPlayer = playerState.players.find(
+    (p) => p.id === playerState.myPlayerId,
+  );
+  const isAlive = myPlayer?.status === "alive";
   const myRole = myPlayer?.role;
   const mySeat = myPlayer?.seatNumber;
-  const aliveCount = playerState.players.filter((p) => !p.isJudge && p.status === 'alive').length;
+  const aliveCount = playerState.players.filter(
+    (p) => !p.isJudge && p.status === "alive",
+  ).length;
   const totalCount = playerState.players.filter((p) => !p.isJudge).length;
 
   // 角色未确认且处于身份展示阶段 → 显示角色揭示
-  if (!roleConfirmed && myRole && phase === 'ROLE_REVEAL') {
+  if (!roleConfirmed && myRole && phase === "ROLE_REVEAL") {
     return (
       <div className="game-panel-container flex-1 overflow-hidden relative">
-        <Suspense fallback={<Loading />}><RoleReveal /></Suspense>
+        <Suspense fallback={<Loading />}>
+          <RoleReveal />
+        </Suspense>
       </div>
     );
   }
 
   // 死亡玩家 → 观战模式（与 GameView 逻辑一致）
-  const showSpectator = !isAlive && myPlayer && phase !== 'LOBBY';
+  const showSpectator = !isAlive && myPlayer && phase !== "LOBBY";
 
   // 背景样式根据阶段切换
-  const isNight = ['NIGHT', 'NIGHT_SETTLEMENT', 'PRE_NIGHT'].includes(phase);
-  const bgClass = isNight ? 'bg-night-phase' : 'bg-gradient-to-b from-amber-950/50 to-night-950';
+  const isNight = ["NIGHT", "NIGHT_SETTLEMENT", "PRE_NIGHT"].includes(phase);
+  const bgClass = isNight
+    ? "bg-night-phase"
+    : "bg-gradient-to-b from-amber-950/50 to-night-950";
 
   return (
     /*
@@ -95,7 +124,9 @@ const GamePanelWrapper: React.FC = () => {
      * 使游戏组件中的 fixed 定位相对于此容器而非整个视口，
      * 避免全屏遮罩覆盖模拟器界面。
      */
-    <div className={`game-panel-container flex-1 overflow-hidden relative flex flex-col ${bgClass}`}>
+    <div
+      className={`game-panel-container flex-1 overflow-hidden relative flex flex-col ${bgClass}`}
+    >
       {/* 顶部状态栏 */}
       <StatusBar />
 
@@ -103,9 +134,11 @@ const GamePanelWrapper: React.FC = () => {
       <JudgeActionToast />
 
       {/* 阶段公告横幅（发言阶段不需要额外提示，SpeechPhase 已有标题） */}
-      {phaseAnnouncement && phase !== 'DAY_SPEECH' && (
+      {phaseAnnouncement && phase !== "DAY_SPEECH" && (
         <div className="mx-4 mt-2 card border-wolf-700 flex items-center justify-between animate-fade-in-up">
-          <span className="text-wolf-300 font-semibold text-sm">{phaseAnnouncement}</span>
+          <span className="text-wolf-300 font-semibold text-sm">
+            {phaseAnnouncement}
+          </span>
           <button
             onClick={dismissAnnouncement}
             className="text-gray-500 hover:text-gray-300 text-xs ml-3"
@@ -122,7 +155,7 @@ const GamePanelWrapper: React.FC = () => {
           {showSpectator && <SpectatorMode />}
 
           {/* 主面板：存活玩家 或 大厅阶段 */}
-          {(isAlive || phase === 'LOBBY') && renderPhasePanel(phase)}
+          {(isAlive || phase === "LOBBY") && renderPhasePanel(phase)}
         </div>
       </Suspense>
 
@@ -154,6 +187,7 @@ const GamePanelWrapper: React.FC = () => {
               </button>
             )}
             <button
+              onClick={() => useSimulatorStore.getState().selectPlayer(null)}
               className="text-xs px-2 py-1 rounded bg-night-800 border border-night-600 text-gray-400 hover:text-red-400 hover:border-red-700 transition-colors"
             >
               离开
@@ -179,16 +213,16 @@ const GamePanelWrapper: React.FC = () => {
 
 function renderPhasePanel(phase: string) {
   switch (phase) {
-    case 'LOBBY':
+    case "LOBBY":
       return <LobbyPanel />;
-    case 'ROLE_REVEAL':
+    case "ROLE_REVEAL":
       return <RoleReveal />;
-    case 'PRE_NIGHT':
+    case "PRE_NIGHT":
       return <PreNightWait />;
-    case 'NIGHT':
-    case 'NIGHT_SETTLEMENT':
+    case "NIGHT":
+    case "NIGHT_SETTLEMENT":
       return <NightPhase />;
-    case 'DAY_ANNOUNCE':
+    case "DAY_ANNOUNCE":
       return (
         <>
           <DayAnnounce />
@@ -200,19 +234,19 @@ function renderPhasePanel(phase: string) {
           </div>
         </>
       );
-    case 'DAY_SPEECH':
+    case "DAY_SPEECH":
       return <SpeechPhase />;
-    case 'PRE_VOTE_WAIT':
+    case "PRE_VOTE_WAIT":
       return <PreVoteWaitPanel />;
-    case 'DAY_VOTE':
-    case 'PK_VOTE':
+    case "DAY_VOTE":
+    case "PK_VOTE":
       return <VotePhase />;
-    case 'SHERIFF_ELECTION':
+    case "SHERIFF_ELECTION":
       return <SheriffElection />;
-    case 'SHERIFF_TRANSFER':
+    case "SHERIFF_TRANSFER":
       return <SheriffTransfer />;
-    case 'DAY_INTERRUPT':
-    case 'DAY_SETTLEMENT':
+    case "DAY_INTERRUPT":
+    case "DAY_SETTLEMENT":
       return <InterruptPanel />;
     default:
       return (
@@ -234,7 +268,9 @@ const LobbyPanel: React.FC = () => {
 
   if (!playerState) return null;
 
-  const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
+  const myPlayer = playerState.players.find(
+    (p) => p.id === playerState.myPlayerId,
+  );
   const isHost = myPlayer?.isHost ?? false;
   const nonJudgePlayers = playerState.players.filter((p) => !p.isJudge);
   const allReady = nonJudgePlayers.every((p) => p.isReady);
@@ -244,7 +280,7 @@ const LobbyPanel: React.FC = () => {
   const enoughPlayers = playerCount >= totalSeats;
 
   // 构建座位号 → 玩家映射
-  const playerBySeat = new Map<number, typeof nonJudgePlayers[number]>();
+  const playerBySeat = new Map<number, (typeof nonJudgePlayers)[number]>();
   nonJudgePlayers.forEach((p) => playerBySeat.set(p.seatNumber, p));
   const allSeats = Array.from({ length: totalSeats }, (_, i) => i + 1);
 
@@ -253,7 +289,10 @@ const LobbyPanel: React.FC = () => {
       <div className="card max-w-md w-full text-center space-y-4">
         <h2 className="text-xl font-bold text-wolf-400">等待玩家加入</h2>
         <p className="text-gray-400">
-          房间码：<span className="font-mono text-white text-lg">{playerState.roomCode}</span>
+          房间码：
+          <span className="font-mono text-white text-lg">
+            {playerState.roomCode}
+          </span>
         </p>
         <p className="text-sm text-gray-500">
           当前 {playerCount}/{totalSeats} 名玩家
@@ -284,15 +323,17 @@ const LobbyPanel: React.FC = () => {
                 key={p.id}
                 className={`flex items-center justify-between px-3 py-2 rounded-lg ${
                   p.seatNumber === myPlayer?.seatNumber
-                    ? 'bg-wolf-900/30 border border-wolf-700'
-                    : 'bg-night-800'
+                    ? "bg-wolf-900/30 border border-wolf-700"
+                    : "bg-night-800"
                 }`}
               >
                 <span className="text-sm">
                   {p.seatNumber}号 {p.nickname}
                 </span>
-                <span className={`text-xs ${p.isReady ? 'text-green-400' : 'text-gray-500'}`}>
-                  {p.isReady ? '已准备' : '未准备'}
+                <span
+                  className={`text-xs ${p.isReady ? "text-green-400" : "text-gray-500"}`}
+                >
+                  {p.isReady ? "已准备" : "未准备"}
                 </span>
               </div>
             );
@@ -319,7 +360,9 @@ const LobbyPanel: React.FC = () => {
           )}
           {/* 法官在场时，法官在控制台开始游戏；玩家显示等待提示 */}
           {hasJudge && allReady && enoughPlayers && (
-            <p className="text-sm text-yellow-400 animate-pulse">等待法官开始游戏...</p>
+            <p className="text-sm text-yellow-400 animate-pulse">
+              等待法官开始游戏...
+            </p>
           )}
           {!hasJudge && isHost && (
             <button
@@ -345,7 +388,7 @@ const InterruptPanel: React.FC = () => {
   const knightDuelResult = useGameStore((s) => s.knightDuelResult);
   const voteResult = useGameStore((s) => s.voteResult);
 
-  const isSettlement = playerState?.phase === 'DAY_SETTLEMENT';
+  const isSettlement = playerState?.phase === "DAY_SETTLEMENT";
 
   // 计算投票详情数据
   const voteData = useMemo(() => {
@@ -354,17 +397,20 @@ const InterruptPanel: React.FC = () => {
     const { votes, eliminated, isPK: isPKResult, pkCandidates } = voteResult;
 
     // 所有投票条目
-    const voteEntries = Object.entries(votes)
-      .map(([voter, target]) => ({
-        voter: Number(voter),
-        target: target as number | null,
-      }));
+    const voteEntries = Object.entries(votes).map(([voter, target]) => ({
+      voter: Number(voter),
+      target: target as number | null,
+    }));
 
     // 有效投票（非弃权）
-    const validVotes = voteEntries.filter((e) => e.target !== null && e.target !== undefined);
+    const validVotes = voteEntries.filter(
+      (e) => e.target !== null && e.target !== undefined,
+    );
 
     // 弃权
-    const abstainVoters = voteEntries.filter((e) => e.target === null || e.target === undefined);
+    const abstainVoters = voteEntries.filter(
+      (e) => e.target === null || e.target === undefined,
+    );
     const abstainCount = abstainVoters.length;
 
     // 按目标分组统计票数
@@ -402,24 +448,24 @@ const InterruptPanel: React.FC = () => {
   }, [voteResult, playerState]);
 
   const getPlayerName = (seat: number) => {
-    if (!playerState) return '';
+    if (!playerState) return "";
     const p = playerState.players.find((pl) => pl.seatNumber === seat);
-    return p?.nickname ?? '';
+    return p?.nickname ?? "";
   };
 
   return (
     <div className="flex-1 flex items-center justify-center p-4 bg-day-phase">
       <div className="card max-w-md w-full text-center space-y-4 animate-fade-in-up">
-        <div className="text-4xl">{isSettlement ? '📋' : '⚡'}</div>
+        <div className="text-4xl">{isSettlement ? "📋" : "⚡"}</div>
         <h2 className="text-xl font-bold text-amber-400">
-          {isSettlement ? '白天结算' : '白天中断'}
+          {isSettlement ? "白天结算" : "白天中断"}
         </h2>
 
         {/* 投票结果显示 */}
         {isSettlement && voteData && (
           <div className="p-4 rounded-lg bg-night-800/50 border border-night-600 space-y-4">
             <h4 className="text-lg font-bold text-amber-300">
-              {voteData.isPKResult ? 'PK投票结果' : '投票结果'}
+              {voteData.isPKResult ? "PK投票结果" : "投票结果"}
             </h4>
 
             {/* 票数柱状图 */}
@@ -427,18 +473,25 @@ const InterruptPanel: React.FC = () => {
               <div className="space-y-2">
                 {voteData.sortedTargets.map(({ target, voters, count }) => {
                   const isEliminated = target === voteData.eliminated;
-                  const barWidth = voteData.maxVotes > 0 ? (count / voteData.maxVotes) * 100 : 0;
+                  const barWidth =
+                    voteData.maxVotes > 0
+                      ? (count / voteData.maxVotes) * 100
+                      : 0;
                   const barColor = isEliminated
-                    ? 'bg-red-500'
-                    : 'bg-amber-500/70';
+                    ? "bg-red-500"
+                    : "bg-amber-500/70";
 
                   return (
                     <div key={target} className="space-y-0.5">
                       <div className="flex items-center justify-between text-sm">
-                        <span className={`font-semibold ${isEliminated ? 'text-red-400' : 'text-gray-200'}`}>
+                        <span
+                          className={`font-semibold ${isEliminated ? "text-red-400" : "text-gray-200"}`}
+                        >
                           {target}号 {getPlayerName(target)}
                         </span>
-                        <span className={`font-mono ${isEliminated ? 'text-red-400' : 'text-amber-300'}`}>
+                        <span
+                          className={`font-mono ${isEliminated ? "text-red-400" : "text-amber-300"}`}
+                        >
                           {count}票
                         </span>
                       </div>
@@ -471,7 +524,11 @@ const InterruptPanel: React.FC = () => {
                 {voteData.abstainCount}人弃权
                 {voteData.abstainVoters.length <= 5 && (
                   <span className="ml-1">
-                    （{voteData.abstainVoters.map((v) => `${v.voter}号`).join('、')}）
+                    （
+                    {voteData.abstainVoters
+                      .map((v) => `${v.voter}号`)
+                      .join("、")}
+                    ）
                   </span>
                 )}
               </div>
@@ -481,33 +538,45 @@ const InterruptPanel: React.FC = () => {
             {voteData.eliminated ? (
               <div className="text-center p-3 bg-red-900/30 rounded-lg border border-red-700 animate-pulse">
                 <p className="text-red-400 font-bold text-lg">
-                  {voteData.eliminated}号玩家 {getPlayerName(voteData.eliminated)} 被放逐出局
+                  {voteData.eliminated}号玩家{" "}
+                  {getPlayerName(voteData.eliminated)} 被放逐出局
                 </p>
               </div>
             ) : (
               <div className="text-center p-3 bg-green-900/30 rounded-lg border border-green-700">
-                <p className="text-green-400 font-bold text-lg">平安日，无人出局</p>
+                <p className="text-green-400 font-bold text-lg">
+                  平安日，无人出局
+                </p>
               </div>
             )}
 
             {/* PK 信息 */}
-            {voteData.isPKResult && voteData.pkCandidates && voteData.pkCandidates.length > 0 && (
-              <div className="p-3 bg-yellow-900/30 rounded-lg border border-yellow-700">
-                <p className="text-yellow-400 font-semibold">⚠ 平票！进入PK投票</p>
-                <p className="text-sm text-yellow-300 mt-1">
-                  PK候选人：{voteData.pkCandidates.map((s) => `${s}号 ${getPlayerName(s)}`).join('、')}
-                </p>
-              </div>
-            )}
+            {voteData.isPKResult &&
+              voteData.pkCandidates &&
+              voteData.pkCandidates.length > 0 && (
+                <div className="p-3 bg-yellow-900/30 rounded-lg border border-yellow-700">
+                  <p className="text-yellow-400 font-semibold">
+                    ⚠ 平票！进入PK投票
+                  </p>
+                  <p className="text-sm text-yellow-300 mt-1">
+                    PK候选人：
+                    {voteData.pkCandidates
+                      .map((s) => `${s}号 ${getPlayerName(s)}`)
+                      .join("、")}
+                  </p>
+                </div>
+              )}
           </div>
         )}
 
         {knightDuelResult && (
-          <div className={`p-4 rounded-lg ${
-            knightDuelResult.targetIsWolf
-              ? 'bg-green-900/30 border border-green-700'
-              : 'bg-red-900/30 border border-red-700'
-          }`}>
+          <div
+            className={`p-4 rounded-lg ${
+              knightDuelResult.targetIsWolf
+                ? "bg-green-900/30 border border-green-700"
+                : "bg-red-900/30 border border-red-700"
+            }`}
+          >
             <p className="font-semibold">
               {knightDuelResult.targetIsWolf
                 ? `⚔️ ${knightDuelResult.targetSeat}号是狼人，决斗胜利！`
@@ -557,7 +626,9 @@ const PreNightWait: React.FC = () => {
           </div>
         )}
         <div className="w-48 mx-auto">
-          <CountdownTimer seconds={phaseTimeRemaining > 0 ? phaseTimeRemaining : fallbackTime} />
+          <CountdownTimer
+            seconds={phaseTimeRemaining > 0 ? phaseTimeRemaining : fallbackTime}
+          />
         </div>
       </div>
     </div>
@@ -577,8 +648,10 @@ const PreVoteWaitPanel: React.FC = () => {
 
   if (!playerState) return null;
 
-  const myPlayer = playerState.players.find((p) => p.id === playerState.myPlayerId);
-  const isKnight = myPlayer?.role === 'knight' && myPlayer?.status === 'alive';
+  const myPlayer = playerState.players.find(
+    (p) => p.id === playerState.myPlayerId,
+  );
+  const isKnight = myPlayer?.role === "knight" && myPlayer?.status === "alive";
 
   const waitTime = ruleConfig?.preVoteWaitTime || 10;
   const countdown = phaseTimeRemaining > 0 ? phaseTimeRemaining : waitTime;
@@ -591,7 +664,7 @@ const PreVoteWaitPanel: React.FC = () => {
           发言结束，即将进入投票
         </h2>
         <p className="text-sm text-gray-400">
-          {isKnight ? '你是骑士，可以发动决斗！' : '等待投票开始...'}
+          {isKnight ? "你是骑士，可以发动决斗！" : "等待投票开始..."}
         </p>
 
         {/* 倒计时 */}
@@ -600,7 +673,11 @@ const PreVoteWaitPanel: React.FC = () => {
         </div>
 
         {/* 骑士决斗按钮 */}
-        {isKnight && <Suspense fallback={null}><KnightDuel /></Suspense>}
+        {isKnight && (
+          <Suspense fallback={null}>
+            <KnightDuel />
+          </Suspense>
+        )}
       </div>
     </div>
   );
@@ -629,7 +706,9 @@ const RoomDissolved: React.FC = () => {
         {/* 玩家信息列表 */}
         {players.length > 0 && (
           <div className="space-y-2 text-left">
-            <h4 className="text-sm font-semibold text-amber-300">本局玩家信息</h4>
+            <h4 className="text-sm font-semibold text-amber-300">
+              本局玩家信息
+            </h4>
             <div className="max-h-64 overflow-y-auto space-y-1">
               {players
                 .sort((a, b) => a.seatNumber - b.seatNumber)
@@ -641,12 +720,17 @@ const RoomDissolved: React.FC = () => {
                     <span className="font-mono w-8">{p.seatNumber}号</span>
                     <span className="flex-1 truncate">{p.nickname}</span>
                     {p.role && (
-                      <span className={`tag ${ROLE_META[p.role as keyof typeof ROLE_META]?.faction === 'evil' ? 'tag-evil' : 'tag-good'}`}>
-                        {ROLE_META[p.role as keyof typeof ROLE_META]?.name ?? p.role}
+                      <span
+                        className={`tag ${ROLE_META[p.role as keyof typeof ROLE_META]?.faction === "evil" ? "tag-evil" : "tag-good"}`}
+                      >
+                        {ROLE_META[p.role as keyof typeof ROLE_META]?.name ??
+                          p.role}
                       </span>
                     )}
-                    <span className={`text-xs ${p.status === 'alive' ? 'text-green-400' : 'text-gray-500'}`}>
-                      {p.status === 'alive' ? '存活' : '已死亡'}
+                    <span
+                      className={`text-xs ${p.status === "alive" ? "text-green-400" : "text-gray-500"}`}
+                    >
+                      {p.status === "alive" ? "存活" : "已死亡"}
                     </span>
                   </div>
                 ))}
@@ -654,7 +738,20 @@ const RoomDissolved: React.FC = () => {
           </div>
         )}
 
-        <p className="text-sm text-gray-500">请在模拟器控制台中操作</p>
+        <button
+          className="btn-primary w-full"
+          onClick={() => {
+            useSimulatorStore.getState().disconnectAll();
+            useGameStore.setState({
+              roomDissolvedData: null,
+              gameOverData: null,
+              playerState: null,
+              judgeState: null,
+            });
+          }}
+        >
+          返回设置
+        </button>
       </div>
     </div>
   );
