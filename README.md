@@ -14,12 +14,14 @@
 - **警长系统** — 支持警长选举、警徽移交、投票权重配置
 - **观战模式** — 死亡玩家可观战，身份按时间逐步暴露
 - **操作日志** — 全量操作记录，支持管理员后台查询与复盘
+- **游戏模拟器** — 多连接测试工具，支持自动策略执行
+- **错误日志系统** — 独立数据库存储，支持错误去重与查询
 
 ## 技术栈
 
 | 层级 | 技术 |
 |------|------|
-| 前端 | React 18 + TypeScript + Zustand + Vite |
+| 前端 | React 18 + TypeScript + Zustand + Vite + Tailwind CSS |
 | 后端 | Node.js + 原生 http 模块 + WebSocket |
 | 数据库 | MongoDB (Mongoose) |
 | 语音 | ZEGO Express WebRTC SDK |
@@ -31,9 +33,12 @@
 langrensha/
 ├── client/          # 前端 React 应用
 │   └── src/
-│       ├── components/   # UI 组件（游戏面板、技能面板、语音控制等）
-│       ├── store/        # Zustand 语音状态
+│       ├── components/   # UI 组件
+│       │   ├── game/     # 游戏面板、技能面板、语音控制等
+│       │   └── simulator/ # 游戏模拟器（多连接测试工具）
+│       ├── store/        # Zustand 状态仓库
 │       ├── hooks/        # 自定义 Hooks
+│       ├── services/     # ZEGO 语音服务封装
 │       ├── useGameStore.ts  # 全局状态仓库
 │       └── App.tsx       # 入口组件
 ├── server/          # 后端 Node.js 服务
@@ -43,7 +48,11 @@ langrensha/
 │       ├── LobbyManager.ts    # 大厅与房间管理
 │       ├── SettlementEngine.ts # 结算引擎
 │       ├── TimerManager.ts    # 定时器管理
-│       └── models.ts          # MongoDB 数据模型
+│       ├── errorLogger.ts     # 错误日志管理
+│       ├── models.ts          # MongoDB 数据模型
+│       ├── services/          # ZEGO Token 服务
+│       ├── migrations/        # 数据库迁移脚本
+│       └── scripts/           # 管理脚本（错误查询等）
 ├── shared/          # 前后端共享类型与常量
 │   ├── types.ts     # 角色、规则、状态、消息类型定义
 │   └── types/
@@ -83,7 +92,7 @@ ADMIN_SECRET=your_admin_secret
 npm run dev
 ```
 
-- 前端：`http://localhost:5173`
+- 前端：`http://localhost:5180`
 - 后端：`ws://localhost:3001`
 
 ### 生产部署
@@ -180,7 +189,11 @@ DAY_VOTE → DAY_SETTLEMENT → [DAY_INTERRUPT] → NIGHT → ...
 
 - **提交规范**：Conventional Commits — `feat|fix|refactor|docs|chore(scope): description`
 - **代码风格**：TypeScript strict mode
-- **注释语言**：中文
+- **注释规范**：
+  - 所有文件顶部统一添加文件头注释块（架构描述 + 设计原则）
+  - 所有导出符号必须添加中文 JSDoc 注释
+  - 注释语言统一使用中文
+  - 禁止使用 bug fix 注释，改用功能性描述
 
 ## 详细文档
 

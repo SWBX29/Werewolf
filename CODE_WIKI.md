@@ -35,6 +35,8 @@
 - **断线重连**：支持 WebSocket 断线自动重连
 - **观战模式**：死亡玩家可观战并查看身份暴露
 - **警长选举**：支持警长选举和警徽移交
+- **游戏模拟器**：多连接测试工具，支持自动策略执行
+- **错误日志系统**：独立数据库存储，支持错误去重与查询
 
 ### 技术栈
 
@@ -42,6 +44,7 @@
 |------|------|
 | 前端框架 | React 18 + TypeScript |
 | 状态管理 | Zustand |
+| 样式框架 | Tailwind CSS |
 | 后端框架 | Node.js + 原生 http 模块 |
 | 数据库 | MongoDB (Mongoose) |
 | 实时通信 | WebSocket (ws 库) |
@@ -120,6 +123,8 @@ langrensha/
 │   │   │   ├── HomeView.tsx    # 首页视图
 │   │   │   ├── JudgeConsole.tsx # 法官控制台
 │   │   │   ├── AdminDashboard.tsx # 管理员后台
+│   │   │   ├── SimulatorView.tsx # 游戏模拟器主视图
+│   │   │   ├── RoomConfigPanel.tsx # 房间配置面板（复用）
 │   │   │   └── game/           # 游戏组件
 │   │   │       ├── GameView.tsx    # 玩家游戏主界面
 │   │   │       ├── StatusBar.tsx   # 状态栏
@@ -152,6 +157,16 @@ langrensha/
 │   │   │       ├── SpectatorMode.tsx   # 观战模式
 │   │   │       ├── DeadChat.tsx        # 死亡玩家聊天
 │   │   │       └── GameOver.tsx        # 游戏结束
+│   │   │   └── simulator/       # 模拟器组件
+│   │   │       ├── useSimulatorStore.ts # 模拟器状态仓库
+│   │   │       ├── SimulatorView.tsx    # 模拟器主视图
+│   │   │       ├── RoomSetupPanel.tsx   # 房间设置面板
+│   │   │       ├── SeatMap.tsx          # 座位图
+│   │   │       ├── EventLog.tsx         # 事件日志
+│   │   │       ├── AutoStrategyPanel.tsx # 自动策略面板
+│   │   │       ├── GamePanelWrapper.tsx # 游戏面板包装器
+│   │   │       ├── storeInjector.ts     # 状态注入器
+│   │   │       └── websocket.ts         # WebSocket 管理
 │   │   ├── store/
 │   │   │   └── useVoiceStore.ts    # 语音状态管理
 │   │   ├── hooks/
@@ -172,12 +187,17 @@ langrensha/
 │   │   ├── LobbyManager.ts     # 大厅与房间管理器
 │   │   ├── SettlementEngine.ts # 结算引擎
 │   │   ├── TimerManager.ts     # 定时器管理器
+│   │   ├── errorLogger.ts      # 错误日志管理器
 │   │   ├── models.ts           # Mongoose 数据模型
 │   │   ├── services/
 │   │   │   └── zegoTokenService.ts # ZEGO Token 服务
-│   │   └ migrations/
-│   │       ├── migrate-log-database.ts
-│   │       └── run-migration.ts
+│   │   ├── migrations/
+│   │   │   ├── migrate-log-database.ts
+│   │   │   └── run-migration.ts
+│   │   └── scripts/
+│   │       └── query-errors.ts # 错误查询脚本
+│   ├── bin/
+│   │   └── mefrpc.exe          # ME Frp 内网穿透工具
 │   ├── package.json
 │   └── tsconfig.json
 │
@@ -315,6 +335,22 @@ const TIMER_NAMES = {
 - 动作类型查询
 - 游戏局 ID 查询
 
+#### [errorLogger.ts](file:///e:/GitHub/langrensha/server/src/errorLogger.ts)
+
+**职责**：错误日志独立数据库连接与记录管理
+
+**核心功能**：
+- 独立 MongoDB 连接（langrensha_errors 数据库）
+- 错误日志持久化（服务端和客户端错误）
+- 相同错误通过 fingerprint 去重，累加计数
+- 错误级别分类（error / warn / fatal）
+- 支持错误查询脚本（scripts/query-errors.ts）
+
+**设计原则**：
+- 错误日志与游戏数据物理隔离
+- 连接失败不影响主游戏流程
+- 去重机制避免重复插入相同错误
+
 ### 4.2 前端模块
 
 #### [useGameStore.ts](file:///e:/GitHub/langrensha/client/src/useGameStore.ts)
@@ -413,6 +449,52 @@ interface GameState {
 - `Player` - 完整玩家数据
 - `PlayerDTO` / `JudgeRoomStateDTO` - 防作弊 DTO
 - `ClientMessage` / `ServerMessage` - WebSocket 消息类型
+
+### 4.4 模拟器模块
+
+#### [useSimulatorStore.ts](file:///e:/GitHub/langrensha/client/src/components/simulator/useSimulatorStore.ts)
+
+**职责**：模拟器 Zustand 全局状态仓库
+
+**核心功能**：
+- 多连接 WebSocket 生命周期管理
+- 服务端消息接收与状态同步
+- 自动策略建议与执行
+- 事件日志记录
+
+**设计原则**：
+- 单一 store 管理所有模拟器连接和状态
+- 通过 storeInjector 将状态桥接到 useGameStore 复用游戏组件
+
+#### [SimulatorView.tsx](file:///e:/GitHub/langrensha/client/src/components/SimulatorView.tsx)
+
+**职责**：游戏模拟器主视图
+
+**核心功能**：
+- 管理 Setup / Lobby / Playing / GameOver 四个模拟器阶段
+- 左侧面板：房间信息 + 座位图 + 大厅控制
+- 右侧面板：玩家操作 / 法官控制 Tab 切换 + 自动策略折叠面板
+- 底部：可折叠事件日志
+
+**布局结构**：
+```
+┌──────────────────────────────────────────────────────────────┐
+│  [左侧面板]  房间信息 | 座位图 | 大厅控制（可拖拽调整宽度）    │
+├──────────────────────────────────────────────────────────────┤
+│  [右侧面板]  玩家操作 / 法官控制 Tab | 自动策略面板           │
+├──────────────────────────────────────────────────────────────┤
+│  [底部]  可折叠事件日志                                       │
+└──────────────────────────────────────────────────────────────┘
+```
+
+#### [storeInjector.ts](file:///e:/GitHub/langrensha/client/src/components/simulator/storeInjector.ts)
+
+**职责**：将模拟器状态注入 useGameStore
+
+**核心功能**：
+- 将选中玩家的 PlayerRoomStateDTO 注入到 useGameStore
+- 拦截消息发送并路由到正确的 WebSocket 连接
+- 组件卸载时自动断开所有模拟器连接
 
 ---
 
@@ -1038,9 +1120,14 @@ const NIGHT_ACTION_ORDER_PRESETS = {
 
 - **提交规范**：遵循 Conventional Commits (`feat|fix|refactor|docs|chore(scope): description`)
 - **代码风格**：TypeScript strict mode，ESLint + Prettier
-- **注释语言**：中文注释，与用户语言保持一致
+- **注释规范**：
+  - 所有文件顶部统一添加文件头注释块（架构描述 + 设计原则）
+  - 所有导出符号（函数、类、接口、类型、常量）必须添加中文 JSDoc 注释
+  - 注释语言统一使用中文，与用户语言保持一致
+  - 禁止使用 bug fix 注释，改用功能性描述说明代码意图
+  - 保留技术术语的英文原文（如 WebSocket、MongoDB、React 等）
 
 ---
 
-> 文档版本：2026-06-18
+> 文档版本：2026-06-20
 > 项目仓库：[langrensha](https://github.com/xxx/langrensha)
