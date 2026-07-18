@@ -205,6 +205,9 @@ DAY_VOTE → DAY_SETTLEMENT → [DAY_INTERRUPT] → NIGHT → ...
 - 状态机完整流转图
 - RuleConfig 完整字段说明
 
+- 
+https://vsllm.com
+
 ## License
 
 MIT
